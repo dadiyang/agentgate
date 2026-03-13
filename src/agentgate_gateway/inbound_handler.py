@@ -42,20 +42,28 @@ class InboundHandler:
         group_name: str,
         text: str,
         dedup_key: str,
+        target_backend_id: str | None = None,
     ):
-        """Called by channel adapters when a message arrives."""
+        """Called by channel adapters when a message arrives.
+
+        target_backend_id: When set (e.g. HTTP channel), skip route matching
+        and inject directly to the specified backend.
+        """
         # 1. Dedup check (3-layer idempotency: channel level)
         if await self._db.has_dedup_key(dedup_key):
             logger.info("Duplicate message ignored: dedup_key=%s", dedup_key)
             return
 
-        # 2. Route match — silent ignore for unmatched routes (AC-10)
-        backend_id = self._router.match(channel_type, bot_id, group_id)
-        if not backend_id:
-            logger.debug(
-                "No route for (%s, %s, %s), ignoring", channel_type, bot_id, group_id
-            )
-            return
+        # 2. Route match — HTTP channel passes target_backend_id directly
+        if target_backend_id:
+            backend_id = target_backend_id
+        else:
+            backend_id = self._router.match(channel_type, bot_id, group_id)
+            if not backend_id:
+                logger.debug(
+                    "No route for (%s, %s, %s), ignoring", channel_type, bot_id, group_id
+                )
+                return
 
         # 3. Persist BEFORE processing (crash safety)
         msg_id = str(uuid.uuid4())

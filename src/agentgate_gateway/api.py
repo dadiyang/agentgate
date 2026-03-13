@@ -66,15 +66,17 @@ class GatewayAPI:
         message_id = str(uuid.uuid4())
 
         # Go through full pipeline (persist → inject to backend)
+        # HTTP channel bypasses routing — backend_id is explicit
         await self._inbound.handle_message(
             channel_type="http",
             bot_id="",
-            group_id=backend_id,  # use backend_id as group_id for HTTP channel
+            group_id=backend_id,
             sender_id=sender_id,
             sender_name=sender_name,
             group_name="",
             text=text,
             dedup_key=dedup_key,
+            target_backend_id=backend_id,
         )
 
         return _json({"ok": True, "message_id": message_id, "backend_id": backend_id}, 200)
@@ -97,7 +99,7 @@ class GatewayAPI:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    f"{url}/api/output?since={since}",
+                    f"{url}/api/output/default?since={since}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
             data = resp.json()
