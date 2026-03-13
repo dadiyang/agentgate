@@ -1,5 +1,7 @@
 """Tests for formatter.py — Markdown to channel format conversion."""
 
+import json
+
 import pytest
 
 from agentgate_gateway.formatter import (
@@ -86,23 +88,42 @@ class TestToTelegramHtml:
 
 
 class TestToFeishuRich:
-    """Test Feishu passthrough (Feishu renders markdown natively)."""
+    """Test Feishu rich post JSON output."""
 
     def test_feishu_passes_through_unchanged(self):
-        """Feishu formatter returns text unchanged."""
+        """Feishu formatter returns JSON string with parsed inline elements."""
         text = "**bold** and `code` and *italic*"
         result = to_feishu_rich(text)
-        assert result == text
+        data = json.loads(result)
+        assert "zh_cn" in data
+        content = data["zh_cn"]["content"]
+        assert len(content) == 1  # one line
+        # Bold element should be present
+        bold_elements = [e for e in content[0] if e.get("style") == ["bold"]]
+        assert len(bold_elements) == 1
+        assert bold_elements[0]["text"] == "bold"
+        # Inline code element should be present
+        code_elements = [e for e in content[0] if e.get("style") == ["code_block"]]
+        assert len(code_elements) == 1
+        assert code_elements[0]["text"] == "code"
 
     def test_feishu_plain_text(self):
-        """Plain text passes through."""
+        """Plain text is wrapped in Feishu post JSON structure."""
         result = to_feishu_rich("Hello Feishu!")
-        assert result == "Hello Feishu!"
+        data = json.loads(result)
+        assert "zh_cn" in data
+        content = data["zh_cn"]["content"]
+        assert len(content) == 1
+        assert content[0] == [{"tag": "text", "text": "Hello Feishu!"}]
 
     def test_feishu_empty(self):
-        """Empty string passes through."""
+        """Empty string produces Feishu post JSON with an empty text element."""
         result = to_feishu_rich("")
-        assert result == ""
+        data = json.loads(result)
+        assert "zh_cn" in data
+        content = data["zh_cn"]["content"]
+        assert len(content) == 1
+        assert content[0] == [{"tag": "text", "text": ""}]
 
 
 class TestFormatForChannel:
@@ -114,10 +135,15 @@ class TestFormatForChannel:
         assert result == "<b>bold</b>"
 
     def test_dispatches_to_feishu(self):
-        """format_for_channel('feishu', ...) passes through."""
+        """format_for_channel('feishu', ...) returns Feishu post JSON."""
         text = "**bold**"
         result = format_for_channel("feishu", text)
-        assert result == text
+        data = json.loads(result)
+        assert "zh_cn" in data
+        content = data["zh_cn"]["content"]
+        bold_elements = [e for e in content[0] if e.get("style") == ["bold"]]
+        assert len(bold_elements) == 1
+        assert bold_elements[0]["text"] == "bold"
 
     def test_unknown_channel_returns_plain(self):
         """Unknown channel type returns text unchanged."""

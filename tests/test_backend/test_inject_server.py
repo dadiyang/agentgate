@@ -151,12 +151,13 @@ class TestConfirmProcessed(AioHTTPTestCase):
         # Confirm
         conf = await self.client.post(
             "/api/confirm_processed",
-            json={"message_id": "track-001"},
+            json={"message_ids": ["track-001"]},
         )
         assert conf.status == 200
         conf_data = await conf.json()
         assert conf_data["ok"] is True
-        assert conf_data["was_pending"] is True
+        assert conf_data["confirmed"] == 1
+        assert "track-001" in conf_data["message_ids"]
 
         # Now unprocessed should be empty
         unproc2 = await self.client.get("/api/unprocessed")
@@ -165,15 +166,16 @@ class TestConfirmProcessed(AioHTTPTestCase):
         assert "track-001" not in ids2
 
     async def test_confirm_nonexistent_message_id(self):
-        """Confirming an unknown message_id returns ok=True with was_pending=False."""
+        """Confirming an unknown message_id returns ok=True with confirmed=0."""
         resp = await self.client.post(
             "/api/confirm_processed",
-            json={"message_id": "ghost-id"},
+            json={"message_ids": ["ghost-id"]},
         )
         assert resp.status == 200
         data = await resp.json()
         assert data["ok"] is True
-        assert data["was_pending"] is False
+        assert data["confirmed"] == 0
+        assert "ghost-id" in data["message_ids"]
 
     async def test_confirm_missing_message_id_field(self):
         """Confirm without message_id field returns 400."""

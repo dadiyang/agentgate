@@ -25,6 +25,8 @@ def _make_db():
     db = MagicMock()
     db.save_outbound = AsyncMock()
     db.update_outbound_push = AsyncMock()
+    db.has_outbound_content_hash = AsyncMock(return_value=False)
+    db.increment_outbound_retry = AsyncMock()
     return db
 
 
@@ -160,7 +162,8 @@ async def test_push_failure_marks_failed():
     messages = [{"content_type": "text", "text": "Hello"}]
     _mock_http_get(poller, _make_output_response(messages))
 
-    await poller._poll_backend("b1", backend)
+    with patch("asyncio.sleep", new=AsyncMock()):
+        await poller._poll_backend("b1", backend)
 
     db.update_outbound_push.assert_called_once()
     call_args = db.update_outbound_push.call_args

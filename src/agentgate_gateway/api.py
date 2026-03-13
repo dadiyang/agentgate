@@ -10,6 +10,18 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 
+def _check_gateway_auth(request: web.Request, api_token: str) -> web.Response | None:
+    """Return error response if Gateway API auth fails, None if OK."""
+    if not api_token:
+        return None  # No token configured = no auth required
+    auth = request.headers.get("Authorization", "")
+    if not auth:
+        return _json({"ok": False, "error": "unauthorized", "msg": "Missing Authorization header"}, 401)
+    if auth != f"Bearer {api_token}":
+        return _json({"ok": False, "error": "forbidden", "msg": "Invalid token"}, 403)
+    return None
+
+
 class GatewayAPI:
     def __init__(self, config, db, router, adapters, backends, inbound_handler, output_poller):
         """
@@ -36,6 +48,9 @@ class GatewayAPI:
 
     async def handle_http_inject(self, request: web.Request) -> web.Response:
         """POST /api/channel/inject — HTTP channel message injection."""
+        auth_err = _check_gateway_auth(request, self.config.api_token)
+        if auth_err:
+            return auth_err
         try:
             body = await request.json()
         except Exception:
@@ -67,6 +82,7 @@ class GatewayAPI:
 
         # Go through full pipeline (persist → inject to backend)
         # HTTP channel bypasses routing — backend_id is explicit
+        # M-6: Pass message_id so DB and API response use the same ID
         await self._inbound.handle_message(
             channel_type="http",
             bot_id="",
@@ -77,12 +93,16 @@ class GatewayAPI:
             text=text,
             dedup_key=dedup_key,
             target_backend_id=backend_id,
+            message_id=message_id,
         )
 
         return _json({"ok": True, "message_id": message_id, "backend_id": backend_id}, 200)
 
     async def handle_http_output(self, request: web.Request) -> web.Response:
         """GET /api/channel/output/{backend_id}?since={offset} — Proxy to backend /api/output."""
+        auth_err = _check_gateway_auth(request, self.config.api_token)
+        if auth_err:
+            return auth_err
         backend_id = request.match_info["backend_id"]
 
         if backend_id not in self._backends:
@@ -150,6 +170,9 @@ class GatewayAPI:
 
     async def handle_messages_query(self, request: web.Request) -> web.Response:
         """POST /api/messages/query — Message query (F13 AC-34~39)."""
+        auth_err = _check_gateway_auth(request, self.config.api_token)
+        if auth_err:
+            return auth_err
         try:
             filters = await request.json()
         except Exception:

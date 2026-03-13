@@ -90,14 +90,30 @@ class FeishuAdapter(ChannelAdapter):
             logger.error("Feishu event error: %s", e, exc_info=True)
 
     async def _real_send_message(self, group_id: str, text: str) -> bool:
+        # Detect if text is Feishu post JSON (from formatter.to_feishu_post)
+        is_post = False
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and "zh_cn" in parsed:
+                is_post = True
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        if is_post:
+            msg_type = "post"
+            content = text  # Already JSON
+        else:
+            msg_type = "text"
+            content = json.dumps({"text": text})
+
         request = (
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
             .request_body(
                 CreateMessageRequestBody.builder()
                 .receive_id(group_id)
-                .msg_type("text")
-                .content(json.dumps({"text": text}))
+                .msg_type(msg_type)
+                .content(content)
                 .build()
             )
             .build()

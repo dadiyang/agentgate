@@ -52,15 +52,20 @@ async def run(config: GatewayConfig) -> None:
     # 3. Build backend states
     backend_states: dict[str, BackendState] = {}
     for bid, bc in config.backends.items():
-        backend_states[bid] = BackendState(url=bc.url, api_token=bc.api_token)
+        backend_states[bid] = BackendState(
+            url=bc.url, api_token=bc.api_token, default_window=bc.default_window
+        )
 
     # 4. Adapters dict (populated below)
     adapters: dict = {}
 
-    # 5. Build inbound handler
-    inbound = InboundHandler(db, router, backend_states, adapters)
+    # 5. Alert manager (built early so inbound/outbound can use it)
+    alert_mgr = AlertManager(config.alerts)
 
-    # 6. Message callback for adapters
+    # 6. Build inbound handler
+    inbound = InboundHandler(db, router, backend_states, adapters, alert_manager=alert_mgr)
+
+    # 7. Message callback for adapters
     async def on_message(
         channel_type: str,
         bot_id: str,
@@ -75,7 +80,7 @@ async def run(config: GatewayConfig) -> None:
             channel_type, bot_id, group_id, sender_id, sender_name, group_name, text, dedup_key
         )
 
-    # 7. Create channel adapters
+    # 8. Create channel adapters
     if config.channels.feishu:
         from agentgate_gateway.adapters.feishu import FeishuAdapter
 
@@ -94,10 +99,7 @@ async def run(config: GatewayConfig) -> None:
         )
 
     # 8. Output poller
-    poller = OutputPoller(db, router, backend_states, adapters, config.poll_interval)
-
-    # 9. Alert manager
-    alert_mgr = AlertManager(config.alerts)
+    poller = OutputPoller(db, router, backend_states, adapters, config.poll_interval, alert_manager=alert_mgr)
 
     # 10. Recovery manager
     recovery = RecoveryManager(db, inbound.reinject_message, poller.repush_message)
@@ -124,10 +126,48 @@ async def run(config: GatewayConfig) -> None:
     await site.start()
     logger.info("Gateway started on port %d (test_mode=%s)", config.port, config.test_mode)
 
-    # 14. Start async tasks
+    # 14. Start async tasks with adapter reconnect wrapper (E-4)
+    async def adapter_run_loop(name: str, adapter, alert: AlertManager):
+        """Outer reconnect loop: restart adapter on failure with exponential backoff."""
+        base_delay = 5
+        max_delay = 300
+        max_failures = 10
+        failures = 0
+        while True:
+            try:
+                logger.info("Starting adapter %s", name)
+                await adapter.start()
+                # start() returned normally — adapter shut down cleanly
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                failures += 1
+                delay = min(base_delay * (2 ** (failures - 1)), max_delay)
+                logger.error(
+                    "Adapter %s failed (attempt %d): %s — retrying in %ds",
+                    name, failures, e, delay, exc_info=True,
+                )
+                if failures >= max_failures:
+                    logger.critical("Adapter %s: circuit open after %d failures", name, max_failures)
+                    await alert.send(
+                        "channel_disconnect", "CRITICAL",
+                        f"通道 {name} 连续 {max_failures} 次启动失败，已熔断",
+                        name,
+                    )
+                    break
+                if failures == 3:
+                    # E-3: Alert on persistent channel disconnect
+                    await alert.send(
+                        "channel_disconnect", "WARNING",
+                        f"通道 {name} 连续 {failures} 次连接失败，持续重试中",
+                        name,
+                    )
+                await asyncio.sleep(delay)
+
     tasks: list[asyncio.Task] = []
     for name, adapter in adapters.items():
-        tasks.append(asyncio.create_task(adapter.start(), name=f"adapter-{name}"))
+        tasks.append(asyncio.create_task(adapter_run_loop(name, adapter, alert_mgr), name=f"adapter-{name}"))
     tasks.append(asyncio.create_task(poller.run(), name="output-poller"))
     tasks.append(asyncio.create_task(prober.run(), name="health-prober"))
 

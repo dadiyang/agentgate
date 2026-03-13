@@ -18,15 +18,17 @@ RETRY_DELAYS = [5, 10, 15]
 
 
 class InboundHandler:
-    def __init__(self, db: MessageDB, router: Router, backends: dict, adapters: dict):
+    def __init__(self, db: MessageDB, router: Router, backends: dict, adapters: dict, alert_manager=None):
         """
         backends: dict of backend_id -> object with .url, .api_token attributes
         adapters: dict of channel_type -> ChannelAdapter
+        alert_manager: optional AlertManager for failure notifications
         """
         self._db = db
         self._router = router
         self._backends = backends
         self._adapters = adapters
+        self._alert_manager = alert_manager
         self._http = httpx.AsyncClient(timeout=DELIVERY_TIMEOUT)
 
     async def close(self):
@@ -43,11 +45,13 @@ class InboundHandler:
         text: str,
         dedup_key: str,
         target_backend_id: str | None = None,
+        message_id: str | None = None,
     ):
         """Called by channel adapters when a message arrives.
 
         target_backend_id: When set (e.g. HTTP channel), skip route matching
         and inject directly to the specified backend.
+        message_id: When set, use this ID instead of generating a new UUID.
         """
         # 1. Dedup check (3-layer idempotency: channel level)
         if await self._db.has_dedup_key(dedup_key):
@@ -66,7 +70,7 @@ class InboundHandler:
                 return
 
         # 3. Persist BEFORE processing (crash safety)
-        msg_id = str(uuid.uuid4())
+        msg_id = message_id or str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         await self._db.save_inbound(
             {
@@ -116,12 +120,18 @@ class InboundHandler:
             if hasattr(backend, "api_token")
             else backend.get("api_token", "")
         )
+        window_name = (
+            backend.default_window
+            if hasattr(backend, "default_window")
+            else backend.get("default_window", "main")
+        )
 
         for attempt in range(MAX_RETRY):
             try:
                 resp = await self._http.post(
                     f"{url}/api/inject",
                     json={
+                        "window_name": window_name,
                         "text": text,
                         "message_id": msg_id,
                         "sender_name": sender_name,
@@ -152,6 +162,9 @@ class InboundHandler:
                     exc_info=True,
                 )
 
+            # E-5: Update retry_count in DB
+            await self._db.increment_inbound_retry(msg_id)
+
             if attempt < MAX_RETRY - 1:
                 await asyncio.sleep(RETRY_DELAYS[attempt])
 
@@ -159,6 +172,16 @@ class InboundHandler:
         await self._db.update_inbound_delivery(
             msg_id, "failed", error_message="3 retries exhausted"
         )
+        # E-3: Alert on delivery failure
+        if self._alert_manager:
+            try:
+                await self._alert_manager.send(
+                    "inbound_delivery_failed", "WARNING",
+                    f"消息送达 {MAX_RETRY} 次重试后失败 (backend={backend_id}, msg_id={msg_id})",
+                    backend_id,
+                )
+            except Exception as e:
+                logger.error("Alert send failed: %s", e, exc_info=True)
         # AC-29: Notify user in the IM group
         adapter = self._adapters.get(channel_type)
         if adapter:

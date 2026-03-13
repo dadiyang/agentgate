@@ -18,6 +18,7 @@ def create_test_app(test_mode: bool = True):
     """Return (app, gateway, mock_adapter, mock_backend, mock_db, mock_inbound)."""
     config = MagicMock()
     config.test_mode = test_mode
+    config.api_token = ""
 
     db = AsyncMock()
     db.get_pending_inbound = AsyncMock(return_value=[])

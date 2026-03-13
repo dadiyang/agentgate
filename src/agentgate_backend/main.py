@@ -41,7 +41,7 @@ async def run(config: BackendConfig) -> None:
     from agentgate_backend.delivery_tracker import DeliveryTracker
     from agentgate_backend.heartbeat import write_heartbeat
     from agentgate_backend.inject_server import start_server
-    from agentgate_backend.self_monitor import SelfMonitor
+    from agentgate_backend.self_monitor import SelfMonitor, SelfMonitorConfig
     from agentgate_backend.session import SessionManager
     from agentgate_backend.tmux_manager import TmuxManager
 
@@ -62,7 +62,12 @@ async def run(config: BackendConfig) -> None:
     )
 
     # 4. Init self-monitor
-    monitor = SelfMonitor(tmux_manager=tmux, session_manager=session_mgr)
+    sm_config = SelfMonitorConfig.from_backend_config()
+    monitor = SelfMonitor(
+        tmux_manager=tmux,
+        config=sm_config,
+        claude_command=config.claude_command,
+    )
 
     # 5. Heartbeat path
     heartbeat_path = (

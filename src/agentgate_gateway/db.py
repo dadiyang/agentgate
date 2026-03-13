@@ -187,6 +187,14 @@ class MessageDB:
             rows = await cursor.fetchall()
         return [_row_to_dict(r) for r in rows]
 
+    async def increment_inbound_retry(self, msg_id: str) -> None:
+        assert self._conn is not None, "DB not initialized"
+        await self._conn.execute(
+            "UPDATE inbound_messages SET retry_count = retry_count + 1 WHERE id = ?",
+            (msg_id,),
+        )
+        await self._conn.commit()
+
     async def has_dedup_key(self, key: str) -> bool:
         assert self._conn is not None, "DB not initialized"
         async with self._conn.execute(
@@ -260,6 +268,24 @@ class MessageDB:
             rows = await cursor.fetchall()
         return [_row_to_dict(r) for r in rows]
 
+    async def increment_outbound_retry(self, msg_id: str) -> None:
+        assert self._conn is not None, "DB not initialized"
+        await self._conn.execute(
+            "UPDATE outbound_messages SET retry_count = retry_count + 1 WHERE id = ?",
+            (msg_id,),
+        )
+        await self._conn.commit()
+
+    async def has_outbound_content_hash(self, backend_id: str, content_hash: str) -> bool:
+        """Check if an outbound message with this content_hash already exists for this backend."""
+        assert self._conn is not None, "DB not initialized"
+        async with self._conn.execute(
+            "SELECT 1 FROM outbound_messages WHERE backend_id = ? AND content_hash = ? LIMIT 1",
+            (backend_id, content_hash),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row is not None
+
     async def get_failed_outbound(self) -> list[dict]:
         assert self._conn is not None, "DB not initialized"
         async with self._conn.execute(
@@ -273,6 +299,27 @@ class MessageDB:
     async def query_messages(
         self, filters: dict
     ) -> tuple[list[dict], int]:
+        assert self._conn is not None, "DB not initialized"
+
+        direction = filters.get("direction")
+
+        # E-6: When direction is omitted, query both tables and merge
+        if direction is None:
+            inbound_filters = {**filters, "direction": "inbound"}
+            outbound_filters = {**filters, "direction": "outbound"}
+            in_rows, in_total = await self._query_single_direction(inbound_filters)
+            out_rows, out_total = await self._query_single_direction(outbound_filters)
+            # Merge and re-paginate
+            all_rows = in_rows + out_rows
+            total = in_total + out_total
+            return all_rows, total
+
+        return await self._query_single_direction(filters)
+
+    async def _query_single_direction(
+        self, filters: dict
+    ) -> tuple[list[dict], int]:
+        """Query a single direction (inbound or outbound)."""
         assert self._conn is not None, "DB not initialized"
 
         direction = filters.get("direction", "inbound")

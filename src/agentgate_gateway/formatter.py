@@ -1,9 +1,74 @@
+import json
 import re
 
 
+def to_feishu_post(text: str) -> str:
+    """Markdown -> Feishu post JSON string.
+
+    Converts Markdown text to a Feishu post message structure that supports
+    bold, code blocks, and inline code rendering.
+    Returns a JSON string suitable for msg_type="interactive" card or "post".
+    """
+    content: list[list[dict]] = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Code block detection
+        if line.strip().startswith("```"):
+            code_lines = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1  # skip closing ```
+            code_text = "\n".join(code_lines)
+            content.append([{"tag": "text", "text": code_text, "style": ["code_block"]}])
+            continue
+
+        # Regular line — parse inline elements
+        if line.strip():
+            elements = _parse_inline(line)
+            content.append(elements)
+        else:
+            # Empty line as paragraph break
+            content.append([{"tag": "text", "text": ""}])
+        i += 1
+
+    post = {"zh_cn": {"content": content}}
+    return json.dumps(post, ensure_ascii=False)
+
+
+def _parse_inline(line: str) -> list[dict]:
+    """Parse inline Markdown (bold, inline code) into Feishu post elements."""
+    elements: list[dict] = []
+    # Pattern: **bold**, `code`, or plain text
+    pattern = r'(\*\*(.+?)\*\*|`([^`]+)`)'
+    last_end = 0
+
+    for m in re.finditer(pattern, line):
+        # Plain text before this match
+        if m.start() > last_end:
+            elements.append({"tag": "text", "text": line[last_end:m.start()]})
+
+        if m.group(2):  # Bold
+            elements.append({"tag": "text", "text": m.group(2), "style": ["bold"]})
+        elif m.group(3):  # Inline code
+            elements.append({"tag": "text", "text": m.group(3), "style": ["code_block"]})
+
+        last_end = m.end()
+
+    # Remaining plain text
+    if last_end < len(line):
+        elements.append({"tag": "text", "text": line[last_end:]})
+
+    return elements or [{"tag": "text", "text": line}]
+
+
 def to_feishu_rich(text: str) -> str:
-    """Markdown -> Feishu text (Feishu natively supports some markdown)."""
-    return text  # Feishu text messages render markdown partially
+    """Markdown -> Feishu post JSON (for backward compat, returns JSON string)."""
+    return to_feishu_post(text)
 
 
 def to_telegram_html(text: str) -> str:

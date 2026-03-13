@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 class BackendState:
     """Runtime state for a backend instance."""
 
-    def __init__(self, url: str, api_token: str):
+    def __init__(self, url: str, api_token: str, default_window: str = "main"):
         self.url = url
         self.api_token = api_token
+        self.default_window = default_window
         self.status: str = "unknown"  # healthy / unhealthy / unknown
         self.fail_count: int = 0
         self.last_check: str | None = None

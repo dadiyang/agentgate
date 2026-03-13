@@ -297,13 +297,15 @@ def create_app(
         })
 
     async def confirm_processed_handler(request: web.Request) -> web.Response:
-        """Gateway calls this to confirm a message was processed by the agent.
+        """Gateway calls this to confirm messages were processed by the agent.
 
         POST /api/confirm_processed
-        {"message_id": "abc123"}
+        {"message_ids": ["abc123", "def456"]}
 
-        Once confirmed, the message_id is removed from the unprocessed tracking dict.
-        Note: the idempotency store (MessageStore) retains it for TTL to prevent
+        Also accepts legacy single-message format: {"message_id": "abc123"}
+
+        Once confirmed, message_ids are removed from the unprocessed tracking dict.
+        Note: the idempotency store (MessageStore) retains them for TTL to prevent
         re-injection of the same message.
         """
         err = _check_auth(request, api_token)
@@ -318,25 +320,34 @@ def create_app(
                 status=400,
             )
 
-        message_id = body.get("message_id", "")
-        if not message_id:
+        # Accept both list and single formats
+        message_ids = body.get("message_ids", [])
+        if not message_ids:
+            single = body.get("message_id", "")
+            if single:
+                message_ids = [single]
+
+        if not message_ids:
             return web.json_response(
-                {"ok": False, "error": "bad_request", "msg": "message_id required"},
+                {"ok": False, "error": "bad_request", "msg": "message_ids (list) or message_id (string) required"},
                 status=400,
             )
 
-        was_pending = message_id in _unprocessed
-        _unprocessed.pop(message_id, None)
+        confirmed = 0
+        for mid in message_ids:
+            if mid in _unprocessed:
+                del _unprocessed[mid]
+                confirmed += 1
 
         logger.info(
-            "confirm_processed: message_id=%s was_pending=%s",
-            message_id, was_pending,
+            "confirm_processed: message_ids=%s confirmed=%d",
+            message_ids, confirmed,
         )
 
         return web.json_response({
             "ok": True,
-            "message_id": message_id,
-            "was_pending": was_pending,
+            "confirmed": confirmed,
+            "message_ids": message_ids,
         })
 
     async def unprocessed_handler(request: web.Request) -> web.Response:

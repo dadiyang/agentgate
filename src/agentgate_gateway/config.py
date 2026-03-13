@@ -23,6 +23,7 @@ class BackendConfig(BaseModel):
     url: str
     api_token: str
     agent_type: str = "claude-code"
+    default_window: str = "main"
 
 
 class RouteConfig(BaseModel):
@@ -43,6 +44,7 @@ class GatewayConfig(BaseModel):
     backends: dict[str, BackendConfig] = {}
     routes: list[RouteConfig] = []
     alerts: AlertsConfig = AlertsConfig()
+    api_token: str = ""
     port: int = 8800
     db_path: Path = Path.home() / ".agentgate" / "gateway" / "messages.db"
     poll_interval: float = 2.0

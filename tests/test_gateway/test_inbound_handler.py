@@ -26,6 +26,7 @@ def _make_handler(db=None, router=None, backends=None, adapters=None):
     db.has_dedup_key = AsyncMock(return_value=False)
     db.save_inbound = AsyncMock()
     db.update_inbound_delivery = AsyncMock()
+    db.increment_inbound_retry = AsyncMock()
 
     if router is None:
         router = MagicMock()

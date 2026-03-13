@@ -15,6 +15,9 @@ from agentgate_gateway.splitter import split_message
 
 logger = logging.getLogger(__name__)
 
+PUSH_MAX_RETRY = 5
+PUSH_RETRY_DELAYS = [2, 4, 8, 16, 30]  # exponential backoff seconds
+
 
 class OutputPoller:
     def __init__(
@@ -24,16 +27,19 @@ class OutputPoller:
         backends: dict,
         adapters: dict,
         poll_interval: float = 2.0,
+        alert_manager=None,
     ):
         """
         backends: dict of backend_id -> object with .url, .api_token, .status attributes
         adapters: dict of channel_type -> ChannelAdapter
+        alert_manager: optional AlertManager for push failure notifications
         """
         self._db = db
         self._router = router
         self._backends = backends
         self._adapters = adapters
         self._poll_interval = poll_interval
+        self._alert_manager = alert_manager
         self._offsets: dict[str, int] = {}  # backend_id -> byte offset
         self._http = httpx.AsyncClient(timeout=10)
         self._running = True
@@ -77,6 +83,9 @@ class OutputPoller:
 
         self._offsets[backend_id] = data.get("next_offset", offset)
 
+        # E-1: Confirm processed messages on backend after getting new output
+        await self._confirm_processed(backend_id, url, token)
+
         # Filter thinking blocks (AC-12): only pass through text messages
         text_messages = [
             m for m in data["messages"] if m.get("content_type") == "text"
@@ -91,6 +100,49 @@ class OutputPoller:
         bindings = self._router.reverse_lookup(backend_id)
         for channel_type, bot_id, group_id in bindings:
             await self._push_to_channel(backend_id, channel_type, group_id, combined)
+
+    async def _confirm_processed(self, backend_id: str, url: str, token: str):
+        """Confirm all pending inbound messages for this backend as processed.
+
+        Called after new agent output is detected — new output implies agent
+        processed pending input. Updates both backend and gateway DB.
+        """
+        try:
+            # Get unprocessed messages from backend
+            resp = await self._http.get(
+                f"{url}/api/unprocessed",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            if not data.get("ok"):
+                return
+            unprocessed = data.get("unprocessed", [])
+            if not unprocessed:
+                return
+
+            message_ids = [m["message_id"] for m in unprocessed]
+
+            # Confirm on backend
+            resp = await self._http.post(
+                f"{url}/api/confirm_processed",
+                json={"message_ids": message_ids},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code != 200:
+                logger.warning("confirm_processed failed for %s: %d", backend_id, resp.status_code)
+
+            # Update gateway DB: mark these messages as processed
+            now = datetime.now(timezone.utc).isoformat()
+            for mid in message_ids:
+                try:
+                    await self._db.update_inbound_process(mid, "processed", processed_at=now)
+                except Exception as e:
+                    logger.error("Failed to update process_status for %s: %s", mid, e, exc_info=True)
+
+        except Exception as e:
+            logger.error("confirm_processed error for %s: %s", backend_id, e, exc_info=True)
 
     async def _push_to_channel(
         self, backend_id: str, channel_type: str, group_id: str, text: str
@@ -107,6 +159,11 @@ class OutputPoller:
             msg_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
 
+            # E-7: Dedup check — skip if same content already pushed for this backend
+            if await self._db.has_outbound_content_hash(backend_id, content_hash):
+                logger.debug("Outbound dedup: content_hash=%s already exists, skipping", content_hash[:16])
+                continue
+
             # Persist BEFORE push (crash safety)
             await self._db.save_outbound(
                 {
@@ -122,7 +179,7 @@ class OutputPoller:
                 }
             )
 
-            # Push to channel
+            # Push to channel with retry
             adapter = self._adapters.get(channel_type)
             if not adapter:
                 logger.warning("No adapter for channel %s", channel_type)
@@ -131,14 +188,47 @@ class OutputPoller:
                 )
                 continue
 
-            success = await adapter.send_message(group_id, part)
-            if success:
-                pushed_at = datetime.now(timezone.utc).isoformat()
-                await self._db.update_outbound_push(msg_id, "pushed", pushed_at=pushed_at)
-            else:
-                await self._db.update_outbound_push(
-                    msg_id, "failed", error_message="send_message returned False"
+            await self._push_with_retry(adapter, msg_id, group_id, part)
+
+    async def _push_with_retry(self, adapter, msg_id: str, group_id: str, text: str):
+        """Push a single message shard with exponential backoff retry."""
+        for attempt in range(PUSH_MAX_RETRY):
+            try:
+                success = await adapter.send_message(group_id, text)
+                if success:
+                    pushed_at = datetime.now(timezone.utc).isoformat()
+                    await self._db.update_outbound_push(msg_id, "pushed", pushed_at=pushed_at)
+                    return
+                logger.warning(
+                    "Push attempt %d/%d failed: send_message returned False (msg_id=%s)",
+                    attempt + 1, PUSH_MAX_RETRY, msg_id,
                 )
+            except Exception as e:
+                logger.error(
+                    "Push attempt %d/%d error (msg_id=%s): %s",
+                    attempt + 1, PUSH_MAX_RETRY, msg_id, e, exc_info=True,
+                )
+
+            # Update retry_count in DB (E-5)
+            await self._db.increment_outbound_retry(msg_id)
+
+            if attempt < PUSH_MAX_RETRY - 1:
+                await asyncio.sleep(PUSH_RETRY_DELAYS[attempt])
+
+        # All retries exhausted
+        await self._db.update_outbound_push(
+            msg_id, "failed", error_message=f"{PUSH_MAX_RETRY} push retries exhausted"
+        )
+        # E-3: Alert on push failure
+        if self._alert_manager:
+            try:
+                await self._alert_manager.send(
+                    "outbound_push_failed", "WARNING",
+                    f"出站消息推送 {PUSH_MAX_RETRY} 次重试后失败 (msg_id={msg_id})",
+                    group_id,
+                )
+            except Exception as e:
+                logger.error("Alert send failed: %s", e, exc_info=True)
 
     async def repush_message(self, msg: dict):
         """Re-push a previously persisted outbound message (for recovery)."""
