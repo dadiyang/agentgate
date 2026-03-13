@@ -106,6 +106,7 @@ async def run(config: GatewayConfig) -> None:
 
     # 11. Health prober callbacks
     async def on_recovered(bid: str) -> None:
+        poller.reset_offset(bid)  # Backend restarted — reset output cursor
         await recovery.on_backend_recovered(bid)
 
     async def on_unhealthy(bid: str) -> None:

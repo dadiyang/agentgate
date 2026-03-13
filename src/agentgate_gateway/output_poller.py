@@ -78,10 +78,37 @@ class OutputPoller:
         if resp.status_code != 200:
             return
         data = resp.json()
-        if not data.get("ok") or data.get("count", 0) == 0:
+        if not data.get("ok"):
             return
 
-        self._offsets[backend_id] = data.get("next_offset", offset)
+        next_offset = data.get("next_offset", offset)
+
+        # Detect backend restart: next_offset < current offset means the
+        # backend's output counter was reset (Bug #9). Re-poll from 0.
+        if next_offset < offset:
+            logger.warning(
+                "Backend %s output counter reset detected "
+                "(next_offset=%d < since=%d) — re-polling from 0",
+                backend_id, next_offset, offset,
+            )
+            self._offsets[backend_id] = 0
+            # Re-fetch from offset 0 to pick up any output generated after restart
+            resp = await self._http.get(
+                f"{url}/api/output/main?since=0",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            if not data.get("ok"):
+                return
+            next_offset = data.get("next_offset", 0)
+
+        if data.get("count", 0) == 0:
+            self._offsets[backend_id] = next_offset
+            return
+
+        self._offsets[backend_id] = next_offset
 
         # E-1: Confirm processed messages on backend after getting new output
         await self._confirm_processed(backend_id, url, token)
@@ -242,6 +269,12 @@ class OutputPoller:
         if success:
             pushed_at = datetime.now(timezone.utc).isoformat()
             await self._db.update_outbound_push(msg["id"], "pushed", pushed_at=pushed_at)
+
+    def reset_offset(self, backend_id: str):
+        """Reset the polling offset for a backend (e.g. after restart)."""
+        old = self._offsets.pop(backend_id, 0)
+        if old > 0:
+            logger.info("Reset output offset for backend %s: %d → 0", backend_id, old)
 
     def stop(self):
         self._running = False
