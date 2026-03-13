@@ -1,6 +1,10 @@
 """Exact triple routing: (channel, bot_id, group_id) → backend_id."""
 
+import logging
+
 from agentgate_gateway.config import RouteConfig
+
+logger = logging.getLogger(__name__)
 
 
 class Router:
@@ -14,6 +18,21 @@ class Router:
             key = (route.channel, route.bot_id, route.group_id)
             self._forward[key] = route.backend
             self._reverse.setdefault(route.backend, []).append(key)
+
+        # Warn on N:1 routes (multiple channels → same backend).
+        # Output is broadcast to ALL bound channels, which is usually
+        # not desired (PRD F04 assumes 1:1).
+        for bid, bindings in self._reverse.items():
+            if len(bindings) > 1:
+                channels = ", ".join(
+                    f"({ch}/{gid})" for ch, _, gid in bindings
+                )
+                logger.warning(
+                    "Backend '%s' has %d routes: %s — output will be "
+                    "broadcast to ALL bound channels. Use separate backends "
+                    "for 1:1 isolation.",
+                    bid, len(bindings), channels,
+                )
 
     def match(self, channel: str, bot_id: str, group_id: str) -> str | None:
         """Exact match only. Returns None if no route found (silent ignore per AC-10)."""
