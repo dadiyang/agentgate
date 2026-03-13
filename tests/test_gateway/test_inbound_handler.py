@@ -63,8 +63,8 @@ async def test_duplicate_message_ignored():
 
 
 @pytest.mark.asyncio
-async def test_no_route_silently_ignored():
-    """Router returns None → save_inbound NOT called, no error raised."""
+async def test_no_route_warns_and_drops():
+    """Router returns None → warning logged, save_inbound NOT called."""
     router = MagicMock()
     router.match = MagicMock(return_value=None)
     handler, db, _ = _make_handler(router=router)

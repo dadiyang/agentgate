@@ -64,8 +64,11 @@ class InboundHandler:
         else:
             backend_id = self._router.match(channel_type, bot_id, group_id)
             if not backend_id:
-                logger.debug(
-                    "No route for (%s, %s, %s), ignoring", channel_type, bot_id, group_id
+                logger.warning(
+                    "No route matched — message dropped. "
+                    "channel=%s bot_id=%s group_id=%s sender=%s "
+                    "(add a route in config.yaml to handle this group)",
+                    channel_type, bot_id, group_id, sender_name,
                 )
                 return
 
