@@ -1,4 +1,7 @@
-CHANNEL_LIMITS = {"feishu": 30000, "telegram": 4096}
+# Raw text limits BEFORE channel-specific formatting.
+# Feishu post JSON wraps each line in {"tag":"text","text":"..."} — roughly 2x
+# expansion, so raw text limit is half the API's ~30000 char content limit.
+CHANNEL_LIMITS = {"feishu": 15000, "telegram": 4096}
 DEFAULT_LIMIT = 30000
 
 

@@ -107,10 +107,10 @@ class TestSplitMessageTelegram:
 
 
 class TestSplitMessageFeishu:
-    """Feishu-specific splitting (30000 char limit)."""
+    """Feishu-specific splitting (15000 raw char limit, ~30k after JSON formatting)."""
 
     def test_feishu_limit_short_message(self):
-        """Message under 30000 chars returns single part."""
+        """Message under limit returns single part."""
         text = "x" * 1000
         result = split_message(text, "feishu")
         assert result == [text]
