@@ -1,0 +1,96 @@
+import asyncio
+import logging
+import os
+
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+from .base import ChannelAdapter, OnMessageCallback
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramAdapter(ChannelAdapter):
+    def __init__(
+        self,
+        bot_token: str,
+        on_message: OnMessageCallback,
+        proxy: str = "",
+    ):
+        super().__init__(name="telegram", on_message=on_message)
+        self._bot_token = bot_token
+        proxy = proxy or os.environ.get("HTTPS_PROXY", "")
+        builder = ApplicationBuilder().token(bot_token)
+        if proxy:
+            builder = builder.proxy(proxy).get_updates_proxy(proxy)
+        self._app = builder.build()
+        self._connected = False
+        self._bot_username = ""
+
+    async def start(self):
+        self._app.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND, self._handle_message
+            )
+        )
+        await self._app.initialize()
+        me = await self._app.bot.get_me()
+        self._bot_username = me.username or ""
+        await self._app.start()
+        await self._app.updater.start_polling()
+        self._connected = True
+
+    async def stop(self):
+        self._connected = False
+        if self._app.updater and self._app.updater.running:
+            await self._app.updater.stop()
+        if self._app.running:
+            await self._app.stop()
+        await self._app.shutdown()
+
+    async def _handle_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if self._test_disconnected:
+            return
+        msg = update.effective_message
+        if not msg or not msg.text:
+            return
+        chat_id = str(msg.chat_id)
+        user = msg.from_user
+        user_id = str(user.id) if user else ""
+        user_name = (
+            (user.full_name or user.username or str(user.id)) if user else ""
+        )
+        chat_title = msg.chat.title or ""
+        if self._on_message:
+            await self._on_message(
+                "telegram",
+                self._bot_username,
+                chat_id,
+                user_id,
+                user_name,
+                chat_title,
+                msg.text,
+                str(update.update_id),
+            )
+
+    async def _real_send_message(self, group_id: str, text: str) -> bool:
+        try:
+            await self._app.bot.send_message(
+                chat_id=int(group_id),
+                text=text,
+                parse_mode="HTML",
+            )
+            return True
+        except Exception as e:
+            logger.error("Telegram send failed: %s", e, exc_info=True)
+            return False
+
+    def _real_is_connected(self) -> bool:
+        return self._connected
