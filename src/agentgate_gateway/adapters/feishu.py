@@ -53,8 +53,11 @@ class FeishuAdapter(ChannelAdapter):
             except asyncio.CancelledError:
                 pass
 
-    def _handle_message_event(self, ctx, conf, event):
-        """Feishu message callback (runs in thread)."""
+    def _handle_message_event(self, event):
+        """Feishu message callback (runs in thread).
+
+        lark-oapi v1.5+ passes a single P2ImMessageReceiveV1 event object.
+        """
         if self._test_disconnected:
             return
         try:
