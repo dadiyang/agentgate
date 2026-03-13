@@ -1,0 +1,174 @@
+"""Inbound message pipeline: channel callback → dedup → persist → route → inject backend."""
+
+import asyncio
+import logging
+import uuid
+from datetime import datetime, timezone
+
+import httpx
+
+from agentgate_gateway.db import MessageDB
+from agentgate_gateway.router import Router
+
+logger = logging.getLogger(__name__)
+
+DELIVERY_TIMEOUT = 30  # seconds
+MAX_RETRY = 3
+RETRY_DELAYS = [5, 10, 15]
+
+
+class InboundHandler:
+    def __init__(self, db: MessageDB, router: Router, backends: dict, adapters: dict):
+        """
+        backends: dict of backend_id -> object with .url, .api_token attributes
+        adapters: dict of channel_type -> ChannelAdapter
+        """
+        self._db = db
+        self._router = router
+        self._backends = backends
+        self._adapters = adapters
+        self._http = httpx.AsyncClient(timeout=DELIVERY_TIMEOUT)
+
+    async def close(self):
+        await self._http.aclose()
+
+    async def handle_message(
+        self,
+        channel_type: str,
+        bot_id: str,
+        group_id: str,
+        sender_id: str,
+        sender_name: str,
+        group_name: str,
+        text: str,
+        dedup_key: str,
+    ):
+        """Called by channel adapters when a message arrives."""
+        # 1. Dedup check (3-layer idempotency: channel level)
+        if await self._db.has_dedup_key(dedup_key):
+            logger.info("Duplicate message ignored: dedup_key=%s", dedup_key)
+            return
+
+        # 2. Route match — silent ignore for unmatched routes (AC-10)
+        backend_id = self._router.match(channel_type, bot_id, group_id)
+        if not backend_id:
+            logger.debug(
+                "No route for (%s, %s, %s), ignoring", channel_type, bot_id, group_id
+            )
+            return
+
+        # 3. Persist BEFORE processing (crash safety)
+        msg_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.save_inbound(
+            {
+                "id": msg_id,
+                "received_at": now,
+                "channel_type": channel_type,
+                "channel_bot_id": bot_id,
+                "group_id": group_id,
+                "group_name": group_name,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "content": text,
+                "backend_id": backend_id,
+                "dedup_key": dedup_key,
+            }
+        )
+
+        # 4. Inject to backend with retry
+        await self._inject_with_retry(
+            msg_id, backend_id, text, sender_name, channel_type, group_id
+        )
+
+    async def _inject_with_retry(
+        self,
+        msg_id: str,
+        backend_id: str,
+        text: str,
+        sender_name: str,
+        channel_type: str,
+        group_id: str,
+    ):
+        backend = self._backends.get(backend_id)
+        if not backend:
+            logger.error("Backend %s not configured", backend_id)
+            await self._db.update_inbound_delivery(
+                msg_id, "failed", error_message=f"Backend {backend_id} not configured"
+            )
+            return
+
+        url = (
+            backend.url
+            if hasattr(backend, "url")
+            else backend.get("url", "")
+        )
+        token = (
+            backend.api_token
+            if hasattr(backend, "api_token")
+            else backend.get("api_token", "")
+        )
+
+        for attempt in range(MAX_RETRY):
+            try:
+                resp = await self._http.post(
+                    f"{url}/api/inject",
+                    json={
+                        "text": text,
+                        "message_id": msg_id,
+                        "sender_name": sender_name,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("ok"):
+                        now = datetime.now(timezone.utc).isoformat()
+                        await self._db.update_inbound_delivery(
+                            msg_id, "delivered", delivered_at=now
+                        )
+                        return
+                logger.warning(
+                    "Inject attempt %d/%d failed: status=%d body=%s",
+                    attempt + 1,
+                    MAX_RETRY,
+                    resp.status_code,
+                    resp.text[:200],
+                )
+            except Exception as e:
+                logger.error(
+                    "Inject attempt %d/%d error: %s",
+                    attempt + 1,
+                    MAX_RETRY,
+                    e,
+                    exc_info=True,
+                )
+
+            if attempt < MAX_RETRY - 1:
+                await asyncio.sleep(RETRY_DELAYS[attempt])
+
+        # All retries exhausted
+        await self._db.update_inbound_delivery(
+            msg_id, "failed", error_message="3 retries exhausted"
+        )
+        # AC-29: Notify user in the IM group
+        adapter = self._adapters.get(channel_type)
+        if adapter:
+            try:
+                await adapter.send_message(
+                    group_id,
+                    "⚠️ 消息暂时无法处理，系统正在恢复中。请稍后重试或联系管理员。",
+                )
+            except Exception as e:
+                logger.error("Failed to notify user: %s", e, exc_info=True)
+
+    async def reinject_message(self, msg: dict):
+        """Re-inject a previously persisted message (for crash recovery)."""
+        await self._inject_with_retry(
+            msg["id"],
+            msg["backend_id"],
+            msg["content"],
+            msg.get("sender_name", ""),
+            msg.get("channel_type", ""),
+            msg.get("group_id", ""),
+        )
