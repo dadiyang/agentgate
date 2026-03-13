@@ -34,3 +34,4 @@ routes:
 alerts:
   telegram_chat_id: "${TELEGRAM_PRIVATE_CHAT_ID}"
   telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
+  telegram_proxy: "http://127.0.0.1:7897"  # 与 channels.telegram.proxy 保持一致

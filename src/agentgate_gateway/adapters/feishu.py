@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
@@ -8,6 +9,11 @@ from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 from .base import ChannelAdapter, OnMessageCallback
 
 logger = logging.getLogger(__name__)
+
+# How long to wait after thread start to check if WS connected successfully
+_STARTUP_CHECK_DELAY = 3.0
+# How often to poll thread liveness when start() blocks
+_LIVENESS_POLL_INTERVAL = 5.0
 
 
 class FeishuAdapter(ChannelAdapter):
@@ -23,11 +29,24 @@ class FeishuAdapter(ChannelAdapter):
         )
         self._ws_client = None
         self._connected = False
-        self._task = None
-        self._loop = None  # store event loop reference for cross-thread callback
+        self._ws_thread: threading.Thread | None = None
+        self._ws_error: Exception | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self):
+        """Start Feishu WebSocket in a dedicated thread with its own event loop.
+
+        lark-oapi ws.Client.start() is synchronous and internally calls
+        loop.run_until_complete() on a module-level event loop. Running it
+        in the main asyncio thread (even via to_thread) fails because the
+        module-level loop reference points to the already-running main loop.
+
+        Fix: spawn a dedicated thread, create a NEW event loop there, and
+        monkey-patch the module-level ``loop`` before calling start().
+        """
         self._loop = asyncio.get_event_loop()
+        self._ws_error = None
+
         event_handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._handle_message_event)
@@ -39,19 +58,68 @@ class FeishuAdapter(ChannelAdapter):
             event_handler=event_handler,
             log_level=lark.LogLevel.WARNING,
         )
-        self._task = asyncio.create_task(
-            asyncio.to_thread(self._ws_client.start)
+
+        self._ws_thread = threading.Thread(
+            target=self._run_ws_blocking, daemon=True, name="feishu-ws"
         )
+        self._ws_thread.start()
+
+        # Wait for initial connection attempt
+        await asyncio.sleep(_STARTUP_CHECK_DELAY)
+
+        if not self._ws_thread.is_alive():
+            self._connected = False
+            err = self._ws_error or RuntimeError("Feishu WebSocket thread died on startup")
+            raise ConnectionError(f"Feishu WebSocket startup failed: {err}")
+
         self._connected = True
+        logger.info("Feishu WebSocket connected")
+
+        # Block until thread exits (adapter_run_loop expects start() to block)
+        while self._ws_thread.is_alive():
+            await asyncio.sleep(_LIVENESS_POLL_INTERVAL)
+
+        # Thread exited = connection lost
+        self._connected = False
+        err = self._ws_error or ConnectionError("Feishu WebSocket connection lost")
+        raise ConnectionError(f"Feishu WebSocket disconnected: {err}")
+
+    def _run_ws_blocking(self):
+        """Run ws.Client.start() in a dedicated thread with its own event loop."""
+        import lark_oapi.ws.client as ws_client_mod
+
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        # Monkey-patch: replace module-level loop so start() uses our fresh loop
+        ws_client_mod.loop = new_loop
+        try:
+            self._ws_client.start()
+        except Exception as e:
+            logger.error("Feishu WS thread error: %s", e, exc_info=True)
+            self._ws_error = e
+            self._connected = False
+        finally:
+            try:
+                new_loop.close()
+            except Exception:
+                pass
 
     async def stop(self):
         self._connected = False
-        if self._task:
-            self._task.cancel()
+        # The WS thread is a daemon thread; closing the internal connection
+        # will cause start() to exit, or the thread will be killed at process exit.
+        if self._ws_client:
             try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+                import lark_oapi.ws.client as ws_client_mod
+                ws_loop = ws_client_mod.loop
+                conn = getattr(self._ws_client, "_conn", None)
+                if conn and ws_loop and not ws_loop.is_closed():
+                    future = asyncio.run_coroutine_threadsafe(conn.close(), ws_loop)
+                    future.result(timeout=5)
+            except Exception as e:
+                logger.debug("Feishu WS stop cleanup: %s", e)
+        if self._ws_thread and self._ws_thread.is_alive():
+            self._ws_thread.join(timeout=5)
 
     def _handle_message_event(self, event):
         """Feishu message callback (runs in thread).

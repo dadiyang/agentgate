@@ -17,11 +17,12 @@ class AlertManager:
 
         tg_token = getattr(config, "telegram_bot_token", "") or ""
         tg_chat = getattr(config, "telegram_chat_id", "") or ""
+        tg_proxy = getattr(config, "telegram_proxy", "") or ""
         if tg_token and tg_chat:
             try:
                 from haloant_kit.telegram import TelegramSender
 
-                self._tg_sender = TelegramSender(tg_token)
+                self._tg_sender = TelegramSender(tg_token, proxy_url=tg_proxy or None)
                 self._tg_chat_id = tg_chat
             except ImportError:
                 logger.warning(

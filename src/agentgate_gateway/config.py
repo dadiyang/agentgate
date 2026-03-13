@@ -37,6 +37,7 @@ class AlertsConfig(BaseModel):
     feishu_webhook: str = ""
     telegram_chat_id: str = ""
     telegram_bot_token: str = ""
+    telegram_proxy: str = ""
 
 
 class GatewayConfig(BaseModel):
