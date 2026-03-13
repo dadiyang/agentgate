@@ -76,6 +76,26 @@ async def run(config: BackendConfig) -> None:
 
     logger.info("Backend '%s' started on port %d", config.name, config.http_port)
 
+    # 5b. Auto-create initial Claude Code window if work_dir is configured
+    #     and no working windows exist yet (first boot).
+    work_dir = config.work_dir
+    if work_dir != Path.home():  # Non-default work_dir means explicitly configured
+        existing_windows = await tmux.list_windows()
+        if not existing_windows:
+            logger.info(
+                "No working windows found — bootstrapping Claude Code in %s",
+                work_dir,
+            )
+            ok, msg, wname, wid = await tmux.create_window(
+                work_dir=str(work_dir),
+                window_name="main",
+                start_claude=True,
+            )
+            if ok:
+                logger.info("Initial window created: %s (id=%s)", wname, wid)
+            else:
+                logger.error("Failed to create initial window: %s", msg)
+
     # 6. Main loop — wait for SIGINT/SIGTERM
     stop = asyncio.Event()
     loop = asyncio.get_event_loop()
