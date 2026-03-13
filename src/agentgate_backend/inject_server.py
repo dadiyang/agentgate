@@ -221,6 +221,9 @@ def create_app(
                 status=404,
             )
 
+        # Ensure session_map is loaded so we can resolve window → JSONL file
+        await session_manager.load_session_map()
+
         messages, count = await session_manager.get_recent_messages(
             window.window_id, start_byte=since,
         )

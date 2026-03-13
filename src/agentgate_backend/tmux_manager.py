@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -106,6 +105,10 @@ class TmuxManager:
         """Get existing session or create a new one."""
         session = self.get_session()
         if session:
+            # Ensure CCBOT_DIR is set even for existing sessions (e.g. after
+            # backend restart). The hook needs this to write session_map.json
+            # to the correct per-instance directory.
+            session.set_environment("CCBOT_DIR", str(config.instance_dir))
             return session
 
         # Create new session with main window named specifically
@@ -113,11 +116,9 @@ class TmuxManager:
             session_name=self.session_name,
             start_directory=str(Path.home()),
         )
-        # Propagate CCBOT_DIR so Claude Code's SessionStart hook writes
+        # Set CCBOT_DIR so Claude Code's SessionStart hook writes
         # session_map.json to the correct per-instance config directory.
-        ccbot_dir_val = os.environ.get("CCBOT_DIR", "")
-        if ccbot_dir_val:
-            session.set_environment("CCBOT_DIR", ccbot_dir_val)
+        session.set_environment("CCBOT_DIR", str(config.instance_dir))
 
         # Rename the default window to the main window name
         if session.windows:
