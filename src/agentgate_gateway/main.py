@@ -1,0 +1,158 @@
+"""CLI entry point for AgentGate Gateway."""
+
+import asyncio
+import logging
+import signal
+from pathlib import Path
+
+import click
+from aiohttp import web
+
+from agentgate_gateway.alert_manager import AlertManager
+from agentgate_gateway.api import GatewayAPI, setup_routes
+from agentgate_gateway.config import GatewayConfig
+from agentgate_gateway.db import MessageDB
+from agentgate_gateway.health_prober import BackendState, HealthProber
+from agentgate_gateway.inbound_handler import InboundHandler
+from agentgate_gateway.output_poller import OutputPoller
+from agentgate_gateway.recovery import RecoveryManager
+from agentgate_gateway.router import Router
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+)
+logger = logging.getLogger("agentgate-gateway")
+
+
+@click.command()
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True))
+@click.option("--port", type=int, default=None, help="Override config port")
+@click.option("--test-mode", is_flag=True, default=False, help="Enable Admin API")
+def main(config_path, port, test_mode):
+    """Start the AgentGate Gateway."""
+    config = GatewayConfig.from_yaml(Path(config_path))
+    if port is not None:
+        config.port = port
+    if test_mode:
+        config.test_mode = True
+    asyncio.run(run(config))
+
+
+async def run(config: GatewayConfig) -> None:
+    """Async main: wire up all components and start the gateway."""
+
+    # 1. Init DB
+    db = MessageDB(config.db_path)
+    await db.init()
+
+    # 2. Build router
+    router = Router(config.routes)
+
+    # 3. Build backend states
+    backend_states: dict[str, BackendState] = {}
+    for bid, bc in config.backends.items():
+        backend_states[bid] = BackendState(url=bc.url, api_token=bc.api_token)
+
+    # 4. Adapters dict (populated below)
+    adapters: dict = {}
+
+    # 5. Build inbound handler
+    inbound = InboundHandler(db, router, backend_states, adapters)
+
+    # 6. Message callback for adapters
+    async def on_message(
+        channel_type: str,
+        bot_id: str,
+        group_id: str,
+        sender_id: str,
+        sender_name: str,
+        group_name: str,
+        text: str,
+        dedup_key: str,
+    ) -> None:
+        await inbound.handle_message(
+            channel_type, bot_id, group_id, sender_id, sender_name, group_name, text, dedup_key
+        )
+
+    # 7. Create channel adapters
+    if config.channels.feishu:
+        from agentgate_gateway.adapters.feishu import FeishuAdapter
+
+        adapters["feishu"] = FeishuAdapter(
+            config.channels.feishu.app_id,
+            config.channels.feishu.app_secret,
+            on_message,
+        )
+    if config.channels.telegram:
+        from agentgate_gateway.adapters.telegram import TelegramAdapter
+
+        adapters["telegram"] = TelegramAdapter(
+            config.channels.telegram.bot_token,
+            on_message,
+            proxy=config.channels.telegram.proxy,
+        )
+
+    # 8. Output poller
+    poller = OutputPoller(db, router, backend_states, adapters, config.poll_interval)
+
+    # 9. Alert manager
+    alert_mgr = AlertManager(config.alerts)
+
+    # 10. Recovery manager
+    recovery = RecoveryManager(db, inbound.reinject_message, poller.repush_message)
+
+    # 11. Health prober callbacks
+    async def on_recovered(bid: str) -> None:
+        await recovery.on_backend_recovered(bid)
+
+    async def on_unhealthy(bid: str) -> None:
+        await alert_mgr.send("backend_unhealthy", "CRITICAL", f"Backend {bid} unreachable", bid)
+
+    prober = HealthProber(backend_states, on_recovered, on_unhealthy, config.probe_interval)
+
+    # 12. Startup recovery (reinject pending messages from before crash)
+    await recovery.recover_on_startup()
+
+    # 13. HTTP API
+    gateway_api = GatewayAPI(config, db, router, adapters, backend_states, inbound, poller)
+    app = web.Application()
+    setup_routes(app, gateway_api)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", config.port)
+    await site.start()
+    logger.info("Gateway started on port %d (test_mode=%s)", config.port, config.test_mode)
+
+    # 14. Start async tasks
+    tasks: list[asyncio.Task] = []
+    for name, adapter in adapters.items():
+        tasks.append(asyncio.create_task(adapter.start(), name=f"adapter-{name}"))
+    tasks.append(asyncio.create_task(poller.run(), name="output-poller"))
+    tasks.append(asyncio.create_task(prober.run(), name="health-prober"))
+
+    # 15. Wait for shutdown signal
+    stop = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    await stop.wait()
+
+    # 16. Graceful shutdown
+    logger.info("Shutting down...")
+    poller.stop()
+    prober.stop()
+    for adapter in adapters.values():
+        await adapter.stop()
+    for task in tasks:
+        task.cancel()
+    await inbound.close()
+    await poller.close()
+    await prober.close()
+    await runner.cleanup()
+    await db.close()
+    logger.info("Gateway shutdown complete.")
+
+
+if __name__ == "__main__":
+    main()
