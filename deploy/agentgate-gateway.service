@@ -1,0 +1,14 @@
+[Unit]
+Description=AgentGate Channel Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=irons
+ExecStart=/home/irons/.local/bin/agentgate-gateway --config /home/irons/.agentgate/gateway/config.yaml
+Restart=always
+RestartSec=3
+Environment=HTTPS_PROXY=http://127.0.0.1:7897
+
+[Install]
+WantedBy=multi-user.target

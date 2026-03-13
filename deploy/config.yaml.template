@@ -1,0 +1,36 @@
+# AgentGate 网关配置模板
+# 复制到 ~/.agentgate/gateway/config.yaml 并填入真实凭证
+
+channels:
+  feishu:
+    app_id: "${FEISHU_APP_ID}"
+    app_secret: "${FEISHU_APP_SECRET}"
+  telegram:
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    proxy: "http://127.0.0.1:7897"  # 中国服务器必须走代理
+
+backends:
+  echo-test:
+    url: "http://127.0.0.1:8901"
+    api_token: "echo-test-token"
+    agent_type: "echo"
+  # fish-dev:
+  #   url: "http://127.0.0.1:8902"
+  #   api_token: "your-token-here"
+  #   agent_type: "claude-code"
+
+routes:
+  # Echo 测试路由（Telegram 私聊）
+  - channel: telegram
+    bot_id: "${TELEGRAM_BOT_USERNAME}"
+    group_id: "${TELEGRAM_PRIVATE_CHAT_ID}"
+    backend: echo-test
+  # 飞书路由示例
+  # - channel: feishu
+  #   bot_id: "${FEISHU_APP_ID}"
+  #   group_id: "oc_xxx"
+  #   backend: fish-dev
+
+alerts:
+  telegram_chat_id: "${TELEGRAM_PRIVATE_CHAT_ID}"
+  telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
