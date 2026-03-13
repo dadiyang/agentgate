@@ -35,11 +35,12 @@ dev = [
 [project.scripts]
 agentgate-gateway = "agentgate_gateway.main:main"
 agentgate-backend = "agentgate_backend.main:main"
+agentgate-ctl = "agentgate_ctl.main:cli"
 echo-backend = "echo_backend.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["agentgate_backend*", "agentgate_gateway*", "echo_backend*"]
+include = ["agentgate_backend*", "agentgate_ctl*", "agentgate_gateway*", "echo_backend*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
