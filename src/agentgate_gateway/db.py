@@ -187,6 +187,21 @@ class MessageDB:
             rows = await cursor.fetchall()
         return [_row_to_dict(r) for r in rows]
 
+    async def get_failed_inbound_for_backend(self, backend_id: str) -> list[dict]:
+        """Get recently-failed inbound messages for a backend (for recovery on backend restore)."""
+        assert self._conn is not None, "DB not initialized"
+        async with self._conn.execute(
+            """
+            SELECT * FROM inbound_messages
+            WHERE backend_id = ?
+              AND delivery_status = 'failed'
+            ORDER BY received_at
+            """,
+            (backend_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_dict(r) for r in rows]
+
     async def increment_inbound_retry(self, msg_id: str) -> None:
         assert self._conn is not None, "DB not initialized"
         await self._conn.execute(

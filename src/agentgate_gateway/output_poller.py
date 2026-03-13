@@ -147,14 +147,17 @@ class OutputPoller:
     async def _push_to_channel(
         self, backend_id: str, channel_type: str, group_id: str, text: str
     ):
-        # Format for target channel
-        formatted = format_for_channel(channel_type, text)
-        # Split if message exceeds channel limit
-        parts = split_message(formatted, channel_type)
+        # Split raw text FIRST, then format each part for the channel.
+        # Formatting (e.g. Feishu JSON) can change size and structure;
+        # splitting after formatting breaks structured output (Bug #5).
+        parts_raw = split_message(text, channel_type)
+        parts = [format_for_channel(channel_type, p) for p in parts_raw]
 
         for i, part in enumerate(parts):
+            # Include shard_index in hash to avoid dedup collision when
+            # different shards have identical content (Bug #6).
             content_hash = hashlib.sha256(
-                f"{backend_id}:{part}:{self._offsets.get(backend_id, 0)}".encode()
+                f"{backend_id}:{i}:{part}:{self._offsets.get(backend_id, 0)}".encode()
             ).hexdigest()
             msg_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()

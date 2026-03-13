@@ -7,13 +7,15 @@ import pytest
 from agentgate_gateway.recovery import RecoveryManager
 
 
-def _make_manager(pending_in=None, pending_out=None, failed_out=None, unprocessed=None):
+def _make_manager(pending_in=None, pending_out=None, failed_out=None, unprocessed=None, failed_in=None):
     db = MagicMock()
     db.get_pending_inbound = AsyncMock(return_value=pending_in or [])
     db.get_pending_outbound = AsyncMock(return_value=pending_out or [])
     db.get_failed_outbound = AsyncMock(return_value=failed_out or [])
     db.get_unprocessed_for_backend = AsyncMock(return_value=unprocessed or [])
+    db.get_failed_inbound_for_backend = AsyncMock(return_value=failed_in or [])
     db.update_inbound_process = AsyncMock()
+    db.update_inbound_delivery = AsyncMock()
 
     inject_fn = AsyncMock()
     repush_fn = AsyncMock()
@@ -71,6 +73,28 @@ async def test_backend_recovered_reinjects_unprocessed():
     db.get_unprocessed_for_backend.assert_called_once_with("backend_a")
     db.update_inbound_process.assert_called_once_with("u1", "reinjected")
     inject_fn.assert_called_once_with(msgs[0])
+
+
+@pytest.mark.asyncio
+async def test_backend_recovered_retries_failed_messages():
+    """Backend recovery retries delivery_status='failed' messages (Bug #7)."""
+    failed_msgs = [
+        {"id": "f1", "content": "failed_during_outage"},
+        {"id": "f2", "content": "also_failed"},
+    ]
+    manager, db, inject_fn, repush_fn = _make_manager(failed_in=failed_msgs)
+
+    await manager.on_backend_recovered("backend_a")
+
+    db.get_failed_inbound_for_backend.assert_called_once_with("backend_a")
+    # delivery_status reset to 'pending' before reinject
+    assert db.update_inbound_delivery.call_count == 2
+    db.update_inbound_delivery.assert_any_call("f1", "pending")
+    db.update_inbound_delivery.assert_any_call("f2", "pending")
+    # inject called for both
+    assert inject_fn.call_count == 2
+    inject_fn.assert_any_call(failed_msgs[0])
+    inject_fn.assert_any_call(failed_msgs[1])
 
 
 @pytest.mark.asyncio

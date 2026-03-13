@@ -47,7 +47,8 @@ class RecoveryManager:
                 logger.error("Failed to repush failed %s: %s", msg["id"], e, exc_info=True)
 
     async def on_backend_recovered(self, backend_id: str):
-        """Backend unhealthy→healthy: re-inject unprocessed messages (AC-21/22)."""
+        """Backend unhealthy→healthy: re-inject unprocessed + failed messages (AC-21/22)."""
+        # 1. Re-inject delivered-but-unprocessed messages
         unprocessed = await self._db.get_unprocessed_for_backend(backend_id)
         logger.info(
             "Backend %s recovered, %d unprocessed messages to reinject",
@@ -61,6 +62,28 @@ class RecoveryManager:
             except Exception as e:
                 logger.error(
                     "Failed to reinject %s for backend %s: %s",
+                    msg["id"],
+                    backend_id,
+                    e,
+                    exc_info=True,
+                )
+
+        # 2. Re-inject failed messages (delivery retries exhausted while backend was down)
+        failed = await self._db.get_failed_inbound_for_backend(backend_id)
+        if failed:
+            logger.info(
+                "Backend %s recovered, %d failed messages to retry",
+                backend_id,
+                len(failed),
+            )
+        for msg in failed:
+            try:
+                # Reset delivery status so reinject can update it properly
+                await self._db.update_inbound_delivery(msg["id"], "pending")
+                await self._inject(msg)
+            except Exception as e:
+                logger.error(
+                    "Failed to reinject failed msg %s for backend %s: %s",
                     msg["id"],
                     backend_id,
                     e,
