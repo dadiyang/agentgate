@@ -16,6 +16,27 @@ from agentgate_gateway.splitter import split_message
 logger = logging.getLogger(__name__)
 
 PUSH_MAX_RETRY = 5
+
+
+def _group_by_role(messages: list[dict]) -> list[tuple[str, list[str]]]:
+    """Group consecutive messages by role.
+
+    Returns list of (role, [text, ...]) tuples. Adjacent messages with the
+    same role are merged; a role change starts a new group.
+    """
+    groups: list[tuple[str, list[str]]] = []
+    for m in messages:
+        role = m.get("role", "assistant")
+        text = m.get("text", "")
+        if not text:
+            continue
+        if groups and groups[-1][0] == role:
+            groups[-1][1].append(text)
+        else:
+            groups.append((role, [text]))
+    return groups
+
+
 PUSH_RETRY_DELAYS = [2, 4, 8, 16, 30]  # exponential backoff seconds
 
 
@@ -70,9 +91,14 @@ class OutputPoller:
             backend.get("api_token", "") if isinstance(backend, dict) else ""
         )
 
+        window = (
+            getattr(backend, "default_window", None)
+            or (backend.get("default_window", "main") if isinstance(backend, dict) else "main")
+        )
+
         offset = self._offsets.get(backend_id, 0)
         resp = await self._http.get(
-            f"{url}/api/output/main?since={offset}",
+            f"{url}/api/output/{window}?since={offset}",
             headers={"Authorization": f"Bearer {token}"},
         )
         if resp.status_code != 200:
@@ -94,7 +120,7 @@ class OutputPoller:
             self._offsets[backend_id] = 0
             # Re-fetch from offset 0 to pick up any output generated after restart
             resp = await self._http.get(
-                f"{url}/api/output/main?since=0",
+                f"{url}/api/output/{window}?since=0",
                 headers={"Authorization": f"Bearer {token}"},
             )
             if resp.status_code != 200:
@@ -120,13 +146,19 @@ class OutputPoller:
         if not text_messages:
             return
 
-        # Combine all text segments
-        combined = "\n\n".join(m["text"] for m in text_messages)
+        # Group consecutive messages by role so user echo and assistant
+        # output are pushed as separate messages (not concatenated).
+        groups = _group_by_role(text_messages)
 
         # Reverse route: find all bound channels for this backend
         bindings = self._router.reverse_lookup(backend_id)
-        for channel_type, bot_id, group_id in bindings:
-            await self._push_to_channel(backend_id, channel_type, group_id, combined)
+        for role, texts in groups:
+            if role == "user":
+                combined = "\n\n".join(f"\U0001f464 {t}" for t in texts)
+            else:
+                combined = "\n\n".join(texts)
+            for channel_type, bot_id, chat_id in bindings:
+                await self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined)
 
     async def _confirm_processed(self, backend_id: str, url: str, token: str):
         """Confirm all pending inbound messages for this backend as processed.
@@ -172,7 +204,7 @@ class OutputPoller:
             logger.error("confirm_processed error for %s: %s", backend_id, e, exc_info=True)
 
     async def _push_to_channel(
-        self, backend_id: str, channel_type: str, group_id: str, text: str
+        self, backend_id: str, channel_type: str, bot_id: str, chat_id: str, text: str
     ):
         # Split raw text FIRST, then format each part for the channel.
         # Formatting (e.g. Feishu JSON) can change size and structure;
@@ -201,7 +233,7 @@ class OutputPoller:
                     "fetched_at": now,
                     "backend_id": backend_id,
                     "channel_type": channel_type,
-                    "group_id": group_id,
+                    "chat_id": chat_id,
                     "content": part,
                     "shard_index": i + 1,
                     "shard_total": len(parts),
@@ -209,8 +241,9 @@ class OutputPoller:
                 }
             )
 
-            # Push to channel with retry
-            adapter = self._adapters.get(channel_type)
+            # Push to channel with retry — try channel:bot_id first (multi-bot),
+            # fallback to channel_type (single-bot compat)
+            adapter = self._adapters.get(f"{channel_type}:{bot_id}") or self._adapters.get(channel_type)
             if not adapter:
                 logger.warning("No adapter for channel %s", channel_type)
                 await self._db.update_outbound_push(
@@ -218,13 +251,13 @@ class OutputPoller:
                 )
                 continue
 
-            await self._push_with_retry(adapter, msg_id, group_id, part)
+            await self._push_with_retry(adapter, msg_id, chat_id, part)
 
-    async def _push_with_retry(self, adapter, msg_id: str, group_id: str, text: str):
+    async def _push_with_retry(self, adapter, msg_id: str, chat_id: str, text: str):
         """Push a single message shard with exponential backoff retry."""
         for attempt in range(PUSH_MAX_RETRY):
             try:
-                success = await adapter.send_message(group_id, text)
+                success = await adapter.send_message(chat_id, text)
                 if success:
                     pushed_at = datetime.now(timezone.utc).isoformat()
                     await self._db.update_outbound_push(msg_id, "pushed", pushed_at=pushed_at)
@@ -255,7 +288,7 @@ class OutputPoller:
                 await self._alert_manager.send(
                     "outbound_push_failed", "WARNING",
                     f"出站消息推送 {PUSH_MAX_RETRY} 次重试后失败 (msg_id={msg_id})",
-                    group_id,
+                    chat_id,
                 )
             except Exception as e:
                 logger.error("Alert send failed: %s", e, exc_info=True)
@@ -265,7 +298,7 @@ class OutputPoller:
         adapter = self._adapters.get(msg["channel_type"])
         if not adapter:
             return
-        success = await adapter.send_message(msg["group_id"], msg["content"])
+        success = await adapter.send_message(msg["chat_id"], msg["content"])
         if success:
             pushed_at = datetime.now(timezone.utc).isoformat()
             await self._db.update_outbound_push(msg["id"], "pushed", pushed_at=pushed_at)
