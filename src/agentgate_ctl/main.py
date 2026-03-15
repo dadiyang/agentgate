@@ -145,7 +145,8 @@ def cli():
               help="Project working directory (default: /tmp/agentgate-<name>)")
 @click.option("--port", type=int, default=None, help="Override auto-allocated port")
 @click.option("--bot-id", default=None, help="Override auto-detected bot_id")
-@click.option("--claude-command", default="claude", help="Claude CLI command (default: claude)")
+@click.option("--claude-command", default="claude --dangerously-skip-permissions",
+              help="Claude CLI command (default: claude --dangerously-skip-permissions)")
 @click.option("--no-start", is_flag=True, help="Only create config, do not start services")
 def create(name, channel, chat_id, workdir, port, bot_id, claude_command, no_start):
     """Create a new agent backend instance.
