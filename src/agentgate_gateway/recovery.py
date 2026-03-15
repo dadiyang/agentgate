@@ -6,6 +6,10 @@ from agentgate_gateway.db import MessageDB
 
 logger = logging.getLogger(__name__)
 
+# Messages with retry_count >= this threshold are considered permanently
+# undeliverable and skipped during startup recovery.
+MAX_RECOVERY_RETRIES = 15
+
 
 class RecoveryManager:
     def __init__(self, db: MessageDB, inject_fn, repush_fn):
@@ -38,9 +42,17 @@ class RecoveryManager:
                 logger.error("Failed to repush %s: %s", msg["id"], e, exc_info=True)
 
         # 3. Failed outbound → try again (channel may have recovered)
+        #    Skip messages that exceeded retry threshold — permanently undeliverable.
         failed_out = await self._db.get_failed_outbound()
-        logger.info("Startup recovery: %d failed outbound messages to retry", len(failed_out))
-        for msg in failed_out:
+        retryable = [m for m in failed_out if m.get("retry_count", 0) < MAX_RECOVERY_RETRIES]
+        skipped = len(failed_out) - len(retryable)
+        if skipped:
+            logger.info(
+                "Startup recovery: skipping %d permanently failed outbound messages (retry_count >= %d)",
+                skipped, MAX_RECOVERY_RETRIES,
+            )
+        logger.info("Startup recovery: %d failed outbound messages to retry", len(retryable))
+        for msg in retryable:
             try:
                 await self._repush(msg)
             except Exception as e:
