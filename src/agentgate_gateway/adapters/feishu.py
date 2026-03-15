@@ -157,7 +157,11 @@ class FeishuAdapter(ChannelAdapter):
         except Exception as e:
             logger.error("Feishu event error: %s", e, exc_info=True)
 
-    async def _real_send_message(self, group_id: str, text: str) -> bool:
+    async def _real_send_message(self, chat_id: str, text: str) -> bool:
+        logger.info(
+            "Feishu outbound: chat_id=%s len=%d text=%s",
+            chat_id, len(text), text[:80],
+        )
         # Detect if text is Feishu post JSON (from formatter.to_feishu_post)
         is_post = False
         try:
@@ -179,7 +183,7 @@ class FeishuAdapter(ChannelAdapter):
             .receive_id_type("chat_id")
             .request_body(
                 CreateMessageRequestBody.builder()
-                .receive_id(group_id)
+                .receive_id(chat_id)
                 .msg_type(msg_type)
                 .content(content)
                 .build()

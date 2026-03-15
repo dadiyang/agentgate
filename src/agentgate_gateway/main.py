@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import logging.handlers
 import signal
 from pathlib import Path
 
@@ -18,10 +19,34 @@ from agentgate_gateway.output_poller import OutputPoller
 from agentgate_gateway.recovery import RecoveryManager
 from agentgate_gateway.router import Router
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-)
+_LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s %(message)s"
+_LOG_DIR = Path.home() / ".agentgate" / "gateway" / "logs"
+_LOG_MAX_BYTES = 100 * 1024 * 1024  # 100MB per file
+_LOG_BACKUP_COUNT = 9  # 10 files × 100MB = 1GB total
+
+
+def _setup_logging() -> None:
+    """Configure logging with console + rotating file output (1GB cap)."""
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter(_LOG_FORMAT)
+    # Console
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+    # Rotating file
+    file_handler = logging.handlers.RotatingFileHandler(
+        _LOG_DIR / "gateway.log",
+        maxBytes=_LOG_MAX_BYTES,
+        backupCount=_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
+
+
+_setup_logging()
 logger = logging.getLogger("agentgate-gateway")
 
 

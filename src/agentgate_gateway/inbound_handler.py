@@ -38,7 +38,7 @@ class InboundHandler:
         self,
         channel_type: str,
         bot_id: str,
-        group_id: str,
+        chat_id: str,
         sender_id: str,
         sender_name: str,
         group_name: str,
@@ -53,6 +53,11 @@ class InboundHandler:
         and inject directly to the specified backend.
         message_id: When set, use this ID instead of generating a new UUID.
         """
+        logger.info(
+            "Inbound: channel=%s bot=%s chat=%s sender=%s text=%s",
+            channel_type, bot_id, chat_id, sender_name, text[:80],
+        )
+
         # 1. Dedup check (3-layer idempotency: channel level)
         if await self._db.has_dedup_key(dedup_key):
             logger.info("Duplicate message ignored: dedup_key=%s", dedup_key)
@@ -61,14 +66,17 @@ class InboundHandler:
         # 2. Route match — HTTP channel passes target_backend_id directly
         if target_backend_id:
             backend_id = target_backend_id
+            logger.info("Inbound routed (direct): backend=%s", backend_id)
         else:
-            backend_id = self._router.match(channel_type, bot_id, group_id)
+            backend_id = self._router.match(channel_type, bot_id, chat_id)
+            if backend_id:
+                logger.info("Inbound routed: (%s, %s, %s) → %s", channel_type, bot_id, chat_id, backend_id)
             if not backend_id:
                 logger.warning(
                     "No route matched — message dropped. "
-                    "channel=%s bot_id=%s group_id=%s sender=%s "
+                    "channel=%s bot_id=%s chat_id=%s sender=%s "
                     "(add a route in config.yaml to handle this group)",
-                    channel_type, bot_id, group_id, sender_name,
+                    channel_type, bot_id, chat_id, sender_name,
                 )
                 return
 
@@ -81,7 +89,7 @@ class InboundHandler:
                 "received_at": now,
                 "channel_type": channel_type,
                 "channel_bot_id": bot_id,
-                "group_id": group_id,
+                "chat_id": chat_id,
                 "group_name": group_name,
                 "sender_id": sender_id,
                 "sender_name": sender_name,
@@ -93,7 +101,7 @@ class InboundHandler:
 
         # 4. Inject to backend with retry
         await self._inject_with_retry(
-            msg_id, backend_id, text, sender_name, channel_type, group_id
+            msg_id, backend_id, text, sender_name, channel_type, chat_id
         )
 
     async def _inject_with_retry(
@@ -103,7 +111,7 @@ class InboundHandler:
         text: str,
         sender_name: str,
         channel_type: str,
-        group_id: str,
+        chat_id: str,
     ):
         backend = self._backends.get(backend_id)
         if not backend:
@@ -190,7 +198,7 @@ class InboundHandler:
         if adapter:
             try:
                 await adapter.send_message(
-                    group_id,
+                    chat_id,
                     "⚠️ 消息暂时无法处理，系统正在恢复中。请稍后重试或联系管理员。",
                 )
             except Exception as e:
@@ -204,5 +212,5 @@ class InboundHandler:
             msg["content"],
             msg.get("sender_name", ""),
             msg.get("channel_type", ""),
-            msg.get("group_id", ""),
+            msg.get("chat_id", ""),
         )

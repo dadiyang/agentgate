@@ -9,6 +9,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from .base import ChannelAdapter, OnMessageCallback
 
@@ -27,9 +28,17 @@ class TelegramAdapter(ChannelAdapter):
         self._bot_token = bot_token
         self._bot_id_override = bot_id_override
         proxy = proxy or os.environ.get("HTTPS_PROXY", "")
-        builder = ApplicationBuilder().token(bot_token)
-        if proxy:
-            builder = builder.proxy(proxy).get_updates_proxy(proxy)
+        # Increase pool_timeout (default 1.0s) to prevent Pool timeout during
+        # shutdown when multiple bots compete for connections to commit offsets.
+        proxy_arg = proxy or None
+        request = HTTPXRequest(pool_timeout=10.0, proxy=proxy_arg)
+        get_updates_request = HTTPXRequest(pool_timeout=10.0, proxy=proxy_arg)
+        builder = (
+            ApplicationBuilder()
+            .token(bot_token)
+            .request(request)
+            .get_updates_request(get_updates_request)
+        )
         self._app = builder.build()
         self._connected = False
         self._bot_username = ""
@@ -40,6 +49,16 @@ class TelegramAdapter(ChannelAdapter):
                 filters.TEXT & ~filters.COMMAND, self._handle_message
             )
         )
+        # Catch-all: log non-text updates (photos, stickers, edited messages, etc.)
+        # that bypass the TEXT filter — helps diagnose "message not received" issues
+        async def _catchall(update: Update, _context: ContextTypes.DEFAULT_TYPE):
+            logger.debug(
+                "TG non-text update [%s]: update_id=%s types=%s",
+                self._bot_username, update.update_id,
+                [k for k in ("message", "edited_message", "channel_post", "callback_query")
+                 if getattr(update, k, None) is not None],
+            )
+        self._app.add_handler(MessageHandler(filters.ALL, _catchall), group=1)
         await self._app.initialize()
         me = await self._app.bot.get_me()
         self._bot_username = self._bot_id_override or me.username or ""
@@ -59,6 +78,13 @@ class TelegramAdapter(ChannelAdapter):
     async def _handle_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ):
+        logger.info(
+            "TG inbound [%s]: update_id=%s chat_id=%s text=%s",
+            self._bot_username,
+            update.update_id,
+            update.effective_chat.id if update.effective_chat else "?",
+            (update.effective_message.text or "")[:50] if update.effective_message else "(no msg)",
+        )
         if self._test_disconnected:
             return
         msg = update.effective_message
@@ -84,6 +110,10 @@ class TelegramAdapter(ChannelAdapter):
             )
 
     async def _real_send_message(self, chat_id: str, text: str) -> bool:
+        logger.info(
+            "TG outbound [%s]: chat_id=%s len=%d text=%s",
+            self._bot_username, chat_id, len(text), text[:80],
+        )
         try:
             await self._app.bot.send_message(
                 chat_id=int(chat_id),
