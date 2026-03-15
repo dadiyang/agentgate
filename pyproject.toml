@@ -39,7 +39,7 @@ agentgate-ctl = "agentgate_ctl.main:cli"
 echo-backend = "echo_backend.main:main"
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
+where = ["src"]
 include = ["agentgate_backend*", "agentgate_ctl*", "agentgate_gateway*", "echo_backend*"]
 
 [tool.pytest.ini_options]
