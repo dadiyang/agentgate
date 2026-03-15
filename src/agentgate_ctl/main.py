@@ -431,6 +431,19 @@ def remove(name, yes):
     if hb_file.exists():
         hb_file.unlink()
 
+    # 6. Clean up poll_offsets from gateway DB
+    db_path = AGENTGATE_HOME / "gateway" / "messages.db"
+    if db_path.exists():
+        import sqlite3
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute("DELETE FROM poll_offsets WHERE backend_id = ?", (name,))
+            conn.commit()
+            conn.close()
+            click.echo(f"  Cleaned poll_offsets for '{name}'")
+        except Exception:
+            pass  # Table may not exist yet
+
     click.echo(f"\n✓ Instance '{name}' removed.")
     click.echo(f"  Note: backend data at {BACKENDS_DIR / name} preserved. "
                 "Delete manually if no longer needed.")
