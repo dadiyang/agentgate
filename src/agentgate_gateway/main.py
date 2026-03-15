@@ -156,9 +156,9 @@ async def run(config: GatewayConfig) -> None:
         alerted_warning = False
         alerted_critical = False
         while True:
+            start_time = asyncio.get_event_loop().time()
             try:
                 logger.info("Starting adapter %s (failures=%d)", name, failures)
-                start_time = asyncio.get_event_loop().time()
                 await adapter.start()
                 # start() returned normally — adapter shut down cleanly
                 break
