@@ -154,16 +154,19 @@ def create(name, channel, chat_id, workdir, port, bot_id, claude_command, no_sta
     Without them: creates a backend-only instance (HTTP API access).
     With --no-start: only creates config files, does not start systemd services.
     """
+    config = _load_gateway_config()
+
     if _instance_exists(name):
-        click.echo(f"Error: instance '{name}' already exists", err=True)
+        click.echo(f"Error: instance '{name}' already exists (backend dir found)", err=True)
+        sys.exit(1)
+    if name in config.get("backends", {}):
+        click.echo(f"Error: backend '{name}' already exists in gateway config", err=True)
         sys.exit(1)
 
     # Validate: --chat-id required when --channel is specified
     if channel and not chat_id:
         click.echo("Error: --chat-id is required when --channel is specified", err=True)
         sys.exit(1)
-
-    config = _load_gateway_config()
 
     # 1. Allocate port
     if port is None:
