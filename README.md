@@ -443,7 +443,8 @@ src/
 │   └── ...
 ├── agentgate_ctl/         # 管理 CLI
 │   └── main.py            # agentgate-ctl (create/list/status/start/stop/remove)
-echo_backend/              # 测试用回声后端
+├── echo_backend/          # 测试用回声后端（echo-backend CLI）
+│   └── main.py
 ```
 
 ## 安装与配置
@@ -565,7 +566,9 @@ agentgate-ctl remove my-agent -y   # 跳过确认
 | 层级 | 关注点 | 机制 |
 |------|--------|------|
 | L0 | 进程存活 | systemd `Restart=always` |
-| L1 | 通道连接 | 适配器独立重连 + 指数退避 |
-| L2 | Backend 可用性 | Gateway 健康探测，连续失败标记 unhealthy |
-| L3 | 消息送达 | inject 后确认，超时重试 |
+| L1 | 通道连接 | 适配器独立重连 + 指数退避，永不熔断（代理恢复后自动重连） |
+| L2 | Backend 可用性 | Gateway 健康探测，连续失败标记 unhealthy，恢复后自动激活 |
+| L3 | 消息送达 | inject 后确认，超时重试（出站失败 >=15 次标记永久失败，不再重试） |
 | L4 | 整体可观测 | `/api/health` 端点暴露所有组件状态 |
+
+每个 Telegram bot 是独立的 adapter，单个 bot 断连不影响其他 bot。Gateway 重启后从持久化的 poll offset 继续轮询，不重推历史消息。
