@@ -86,7 +86,7 @@ class GatewayAPI:
         await self._inbound.handle_message(
             channel_type="http",
             bot_id="",
-            group_id=backend_id,
+            chat_id=backend_id,
             sender_id=sender_id,
             sender_name=sender_name,
             group_name="",
@@ -114,12 +114,13 @@ class GatewayAPI:
         backend = self._backends[backend_id]
         url = getattr(backend, "url", "")
         token = getattr(backend, "api_token", "")
+        window = getattr(backend, "default_window", "main")
         since = request.rel_url.query.get("since", "0")
 
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    f"{url}/api/output/default?since={since}",
+                    f"{url}/api/output/{window}?since={since}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
             data = resp.json()
