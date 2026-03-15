@@ -138,18 +138,29 @@ def cli():
 
 @cli.command()
 @click.argument("name")
-@click.option("--channel", required=True, type=click.Choice(["feishu", "telegram"]),
-              help="Channel type for routing")
-@click.option("--group-id", required=True, help="IM group ID for routing")
-@click.option("--workdir", default=None, type=click.Path(),
+@click.option("--channel", default=None, type=click.Choice(["feishu", "telegram"]),
+              help="Channel type for routing (optional — omit for HTTP-only backends)")
+@click.option("--chat-id", default=None, help="Chat ID for routing (required with --channel)")
+@click.option("--workdir", "--work-dir", default=None, type=click.Path(),
               help="Project working directory (default: /tmp/agentgate-<name>)")
 @click.option("--port", type=int, default=None, help="Override auto-allocated port")
 @click.option("--bot-id", default=None, help="Override auto-detected bot_id")
 @click.option("--claude-command", default="claude", help="Claude CLI command (default: claude)")
-def create(name, channel, group_id, workdir, port, bot_id, claude_command):
-    """Create and start a new agent backend instance."""
+@click.option("--no-start", is_flag=True, help="Only create config, do not start services")
+def create(name, channel, chat_id, workdir, port, bot_id, claude_command, no_start):
+    """Create a new agent backend instance.
+
+    With --channel and --chat-id: also registers a gateway route.
+    Without them: creates a backend-only instance (HTTP API access).
+    With --no-start: only creates config files, does not start systemd services.
+    """
     if _instance_exists(name):
         click.echo(f"Error: instance '{name}' already exists", err=True)
+        sys.exit(1)
+
+    # Validate: --chat-id required when --channel is specified
+    if channel and not chat_id:
+        click.echo("Error: --chat-id is required when --channel is specified", err=True)
         sys.exit(1)
 
     config = _load_gateway_config()
@@ -161,8 +172,8 @@ def create(name, channel, group_id, workdir, port, bot_id, claude_command):
         click.echo(f"Error: port {port} already in use", err=True)
         sys.exit(1)
 
-    # 2. Auto-detect bot_id
-    if bot_id is None:
+    # 2. Auto-detect bot_id (only when channel routing is requested)
+    if channel and bot_id is None:
         bot_id = _detect_bot_id(config, channel)
         if not bot_id:
             click.echo(f"Error: cannot auto-detect bot_id for channel '{channel}'. "
@@ -203,28 +214,42 @@ def create(name, channel, group_id, workdir, port, bot_id, claude_command):
         "agent_type": "claude-code",
     }
 
-    # 7. Update gateway config: add route
-    if "routes" not in config:
-        config["routes"] = []
-    new_route = {
-        "channel": channel,
-        "bot_id": bot_id,
-        "group_id": group_id,
-        "backend": name,
-    }
-    # Check for duplicate route
-    for r in config["routes"]:
-        if (r.get("channel") == channel and
-            r.get("bot_id") == bot_id and
-            r.get("group_id") == group_id):
-            click.echo(f"  Warning: route for ({channel}, {bot_id}, {group_id}) already exists, "
-                        f"updating backend to '{name}'")
-            r["backend"] = name
-            break
-    else:
-        config["routes"].append(new_route)
+    # 7. Update gateway config: add route (only if channel specified)
+    if channel:
+        if "routes" not in config:
+            config["routes"] = []
+        new_route = {
+            "channel": channel,
+            "bot_id": bot_id,
+            "chat_id": chat_id,
+            "backend": name,
+        }
+        # Check for duplicate route
+        for r in config["routes"]:
+            if (r.get("channel") == channel and
+                r.get("bot_id") == bot_id and
+                r.get("chat_id") == chat_id):
+                click.echo(f"  Warning: route for ({channel}, {bot_id}, {chat_id}) already exists, "
+                            f"updating backend to '{name}'")
+                r["backend"] = name
+                break
+        else:
+            config["routes"].append(new_route)
+
     _save_gateway_config(config)
     click.echo(f"  Updated gateway config: backend '{name}' on port {port}")
+
+    if no_start:
+        # Summary for no-start mode
+        click.echo(f"\n✓ Instance '{name}' created (not started):")
+        click.echo(f"  Port:      {port}")
+        click.echo(f"  Workdir:   {workdir}")
+        if channel:
+            click.echo(f"  Channel:   {channel}")
+            click.echo(f"  Chat ID:  {chat_id}")
+            click.echo(f"  Bot ID:    {bot_id}")
+        click.echo(f"  Service:   {SYSTEMD_TEMPLATE.format(name=name)}")
+        return
 
     # 8. Start backend via systemd
     service = SYSTEMD_TEMPLATE.format(name=name)
@@ -240,9 +265,10 @@ def create(name, channel, group_id, workdir, port, bot_id, claude_command):
     # 10. Summary
     click.echo(f"\n✓ Instance '{name}' created successfully:")
     click.echo(f"  Port:      {port}")
-    click.echo(f"  Channel:   {channel}")
-    click.echo(f"  Group ID:  {group_id}")
-    click.echo(f"  Bot ID:    {bot_id}")
+    if channel:
+        click.echo(f"  Channel:   {channel}")
+        click.echo(f"  Chat ID:  {chat_id}")
+        click.echo(f"  Bot ID:    {bot_id}")
     click.echo(f"  Workdir:   {workdir}")
     click.echo(f"  Service:   {service}")
 
@@ -263,7 +289,7 @@ def list_instances():
     config = _load_gateway_config()
 
     # Header
-    click.echo(f"{'NAME':<20} {'PORT':<8} {'STATUS':<12} {'CHANNEL':<12} {'GROUP_ID'}")
+    click.echo(f"{'NAME':<20} {'PORT':<8} {'STATUS':<12} {'CHANNEL':<12} {'CHAT_ID'}")
     click.echo("-" * 80)
 
     for name in instances:
@@ -273,14 +299,14 @@ def list_instances():
 
         # Find route info
         channel = "-"
-        group_id = "-"
+        chat_id = "-"
         for r in config.get("routes", []):
             if r.get("backend") == name:
                 channel = r.get("channel", "-")
-                group_id = r.get("group_id", "-")
+                chat_id = r.get("chat_id", "-")
                 break
 
-        click.echo(f"{name:<20} {port:<8} {status:<12} {channel:<12} {group_id}")
+        click.echo(f"{name:<20} {port:<8} {status:<12} {channel:<12} {chat_id}")
 
 
 @cli.command()
@@ -311,7 +337,7 @@ def status(name):
     config = _load_gateway_config()
     for r in config.get("routes", []):
         if r.get("backend") == name:
-            click.echo(f"  Route:       {r['channel']} / {r.get('bot_id', '?')} / {r['group_id']}")
+            click.echo(f"  Route:       {r['channel']} / {r.get('bot_id', '?')} / {r['chat_id']}")
 
 
 @cli.command()
@@ -375,7 +401,16 @@ def remove(name, yes):
     _systemctl("stop", service, check=False)
     _systemctl("disable", service, check=False)
 
-    # 2. Remove from gateway config
+    # 2. Kill tmux session (if exists)
+    tmux_session = f"agentgate-{name}"
+    result = subprocess.run(
+        ["tmux", "kill-session", "-t", tmux_session],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        click.echo(f"  Killed tmux session '{tmux_session}'")
+
+    # 3. Remove from gateway config
     config = _load_gateway_config()
     if name in config.get("backends", {}):
         del config["backends"][name]
@@ -384,11 +419,11 @@ def remove(name, yes):
     _save_gateway_config(config)
     click.echo(f"  Removed '{name}' from gateway config")
 
-    # 3. Restart gateway
+    # 4. Restart gateway
     click.echo("  Restarting agentgate-gateway...")
     _systemctl("restart", "agentgate-gateway.service", check=False)
 
-    # 4. Clean up heartbeat
+    # 5. Clean up heartbeat
     hb_file = HEARTBEAT_DIR / f"{name}.json"
     if hb_file.exists():
         hb_file.unlink()
