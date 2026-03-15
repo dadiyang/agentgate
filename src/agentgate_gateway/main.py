@@ -143,39 +143,54 @@ async def run(config: GatewayConfig) -> None:
 
     # 14. Start async tasks with adapter reconnect wrapper (E-4)
     async def adapter_run_loop(name: str, adapter, alert: AlertManager):
-        """Outer reconnect loop: restart adapter on failure with exponential backoff."""
+        """Outer reconnect loop: restart adapter on failure with exponential backoff.
+
+        Never gives up — keeps retrying at max_delay interval after circuit opens.
+        Resets failure counter after adapter runs successfully for >60s.
+        """
         base_delay = 5
         max_delay = 300
-        max_failures = 10
+        alert_threshold = 3
+        critical_threshold = 10
         failures = 0
+        alerted_warning = False
+        alerted_critical = False
         while True:
             try:
-                logger.info("Starting adapter %s", name)
+                logger.info("Starting adapter %s (failures=%d)", name, failures)
+                start_time = asyncio.get_event_loop().time()
                 await adapter.start()
                 # start() returned normally — adapter shut down cleanly
                 break
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                # If adapter ran for >60s before failing, reset counter
+                # (it was working, this is a new failure sequence)
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed > 60:
+                    failures = 0
+                    alerted_warning = False
+                    alerted_critical = False
+
                 failures += 1
                 delay = min(base_delay * (2 ** (failures - 1)), max_delay)
                 logger.error(
-                    "Adapter %s failed (attempt %d): %s — retrying in %ds",
-                    name, failures, e, delay, exc_info=True,
+                    "Adapter %s failed (attempt %d, ran %.0fs): %s — retrying in %ds",
+                    name, failures, elapsed, e, delay, exc_info=True,
                 )
-                if failures >= max_failures:
-                    logger.critical("Adapter %s: circuit open after %d failures", name, max_failures)
-                    await alert.send(
-                        "channel_disconnect", "CRITICAL",
-                        f"通道 {name} 连续 {max_failures} 次启动失败，已熔断",
-                        name,
-                    )
-                    break
-                if failures == 3:
-                    # E-3: Alert on persistent channel disconnect
+                if failures == alert_threshold and not alerted_warning:
+                    alerted_warning = True
                     await alert.send(
                         "channel_disconnect", "WARNING",
                         f"通道 {name} 连续 {failures} 次连接失败，持续重试中",
+                        name,
+                    )
+                if failures == critical_threshold and not alerted_critical:
+                    alerted_critical = True
+                    await alert.send(
+                        "channel_disconnect", "CRITICAL",
+                        f"通道 {name} 连续 {critical_threshold} 次启动失败，继续重试中",
                         name,
                     )
                 await asyncio.sleep(delay)

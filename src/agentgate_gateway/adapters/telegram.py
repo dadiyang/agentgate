@@ -21,9 +21,11 @@ class TelegramAdapter(ChannelAdapter):
         bot_token: str,
         on_message: OnMessageCallback,
         proxy: str = "",
+        bot_id_override: str = "",
     ):
         super().__init__(name="telegram", on_message=on_message)
         self._bot_token = bot_token
+        self._bot_id_override = bot_id_override
         proxy = proxy or os.environ.get("HTTPS_PROXY", "")
         builder = ApplicationBuilder().token(bot_token)
         if proxy:
@@ -40,10 +42,11 @@ class TelegramAdapter(ChannelAdapter):
         )
         await self._app.initialize()
         me = await self._app.bot.get_me()
-        self._bot_username = me.username or ""
+        self._bot_username = self._bot_id_override or me.username or ""
         await self._app.start()
         await self._app.updater.start_polling()
         self._connected = True
+        logger.info("Telegram bot started: %s", self._bot_username)
 
     async def stop(self):
         self._connected = False
@@ -80,15 +83,30 @@ class TelegramAdapter(ChannelAdapter):
                 str(update.update_id),
             )
 
-    async def _real_send_message(self, group_id: str, text: str) -> bool:
+    async def _real_send_message(self, chat_id: str, text: str) -> bool:
         try:
             await self._app.bot.send_message(
-                chat_id=int(group_id),
+                chat_id=int(chat_id),
                 text=text,
                 parse_mode="HTML",
             )
             return True
         except Exception as e:
+            # HTML parse failure (e.g. "<根因>" treated as tag) — fallback to plain text
+            err_msg = str(e).lower()
+            if "parse entities" in err_msg or "can't parse" in err_msg:
+                logger.warning(
+                    "Telegram HTML parse failed, retrying as plain text: %s", e,
+                )
+                try:
+                    await self._app.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=text,
+                    )
+                    return True
+                except Exception as e2:
+                    logger.error("Telegram plain text send also failed: %s", e2, exc_info=True)
+                    return False
             logger.error("Telegram send failed: %s", e, exc_info=True)
             return False
 
