@@ -152,6 +152,10 @@ class InboundHandler:
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("ok"):
+                        logger.info(
+                            "Inject ok: backend=%s msg_id=%s delivery_id=%s",
+                            backend_id, msg_id, data.get("delivery_id"),
+                        )
                         now = datetime.now(timezone.utc).isoformat()
                         await self._db.update_inbound_delivery(
                             msg_id, "delivered", delivered_at=now

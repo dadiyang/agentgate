@@ -47,6 +47,10 @@ def _setup_logging() -> None:
 
 
 _setup_logging()
+# Suppress httpx INFO logs (polling noise: ~95% of log volume).
+# Errors/warnings still logged.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("agentgate-gateway")
 
 

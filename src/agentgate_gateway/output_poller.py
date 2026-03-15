@@ -183,10 +183,15 @@ class OutputPoller:
                 return
             next_offset = data.get("next_offset", 0)
 
-        if data.get("count", 0) == 0:
+        msg_count = data.get("count", 0)
+        if msg_count == 0:
             await self._set_offset(backend_id, next_offset)
             return
 
+        logger.info(
+            "Polled %d new messages from backend=%s (offset %d→%d)",
+            msg_count, backend_id, offset, next_offset,
+        )
         await self._set_offset(backend_id, next_offset)
 
         # E-1: Confirm processed messages on backend after getting new output

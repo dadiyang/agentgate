@@ -61,6 +61,7 @@ class GatewayAPI:
             return _json({"ok": False, "error": "bad_request", "msg": "backend_id required"}, 400)
 
         if backend_id not in self._backends:
+            logger.warning("Inject rejected: backend '%s' not found (sender=%s)", backend_id, body.get("sender_id", "?"))
             return _json(
                 {"ok": False, "error": "backend_not_found", "msg": f"Backend '{backend_id}' not configured"},
                 404,
