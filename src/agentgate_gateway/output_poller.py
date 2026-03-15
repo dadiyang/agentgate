@@ -350,13 +350,18 @@ class OutputPoller:
 
     async def repush_message(self, msg: dict):
         """Re-push a previously persisted outbound message (for recovery)."""
-        adapter = self._adapters.get(msg["channel_type"])
+        adapter = (
+            self._adapters.get(f"{msg['channel_type']}:{msg.get('bot_id', '')}")
+            or self._adapters.get(msg["channel_type"])
+        )
         if not adapter:
             return
         success = await adapter.send_message(msg["chat_id"], msg["content"])
         if success:
             pushed_at = datetime.now(timezone.utc).isoformat()
             await self._db.update_outbound_push(msg["id"], "pushed", pushed_at=pushed_at)
+        else:
+            await self._db.increment_outbound_retry(msg["id"])
 
     async def reset_offset(self, backend_id: str):
         """Reset the polling offset for a backend (e.g. after restart)."""
