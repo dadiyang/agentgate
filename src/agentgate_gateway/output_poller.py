@@ -68,8 +68,28 @@ class OutputPoller:
     async def close(self):
         await self._http.aclose()
 
+    async def restore_offsets(self):
+        """Load persisted poll offsets from DB on startup."""
+        try:
+            saved = await self._db.load_poll_offsets()
+            if saved:
+                self._offsets.update(saved)
+                logger.info("Restored poll offsets for %d backends: %s",
+                            len(saved), {k: v for k, v in saved.items()})
+        except Exception as e:
+            logger.error("Failed to restore poll offsets: %s", e, exc_info=True)
+
+    async def _set_offset(self, backend_id: str, offset: int) -> None:
+        """Update in-memory offset and persist to DB."""
+        self._offsets[backend_id] = offset
+        try:
+            await self._db.save_poll_offset(backend_id, offset)
+        except Exception as e:
+            logger.error("Failed to persist offset for %s: %s", backend_id, e, exc_info=True)
+
     async def run(self):
         """Main polling loop."""
+        await self.restore_offsets()
         while self._running:
             for backend_id, backend in list(self._backends.items()):
                 status = getattr(backend, "status", None)
@@ -82,6 +102,33 @@ class OutputPoller:
                 except Exception as e:
                     logger.error("Poll %s failed: %s", backend_id, e, exc_info=True)
             await asyncio.sleep(self._poll_interval)
+
+    async def _seed_offset(self, backend_id: str, url: str, token: str, window: str):
+        """Fetch backend's current output position without processing messages.
+
+        Used on first encounter (new instance or DB lost) to avoid replaying
+        all historical output. Sets offset to the backend's current end position.
+        """
+        try:
+            resp = await self._http.get(
+                f"{url}/api/output/{window}?since=0",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("ok"):
+                    pos = data.get("next_offset", 0)
+                    await self._set_offset(backend_id, pos)
+                    logger.info(
+                        "Seeded offset for new backend %s: %d (skipping history)",
+                        backend_id, pos,
+                    )
+                    return
+        except Exception as e:
+            logger.error("Failed to seed offset for %s: %s", backend_id, e, exc_info=True)
+        # Fallback: set to 0 so we don't retry seeding every cycle,
+        # but content_hash dedup will prevent duplicate pushes.
+        await self._set_offset(backend_id, 0)
 
     async def _poll_backend(self, backend_id: str, backend):
         url = getattr(backend, "url", None) or (
@@ -96,7 +143,13 @@ class OutputPoller:
             or (backend.get("default_window", "main") if isinstance(backend, dict) else "main")
         )
 
-        offset = self._offsets.get(backend_id, 0)
+        # First encounter with no saved offset: seed from backend's current
+        # position to avoid replaying history (P0 Bug #11).
+        if backend_id not in self._offsets:
+            await self._seed_offset(backend_id, url, token, window)
+            return
+
+        offset = self._offsets[backend_id]
         resp = await self._http.get(
             f"{url}/api/output/{window}?since={offset}",
             headers={"Authorization": f"Bearer {token}"},
@@ -117,7 +170,7 @@ class OutputPoller:
                 "(next_offset=%d < since=%d) — re-polling from 0",
                 backend_id, next_offset, offset,
             )
-            self._offsets[backend_id] = 0
+            await self._set_offset(backend_id, 0)
             # Re-fetch from offset 0 to pick up any output generated after restart
             resp = await self._http.get(
                 f"{url}/api/output/{window}?since=0",
@@ -131,10 +184,10 @@ class OutputPoller:
             next_offset = data.get("next_offset", 0)
 
         if data.get("count", 0) == 0:
-            self._offsets[backend_id] = next_offset
+            await self._set_offset(backend_id, next_offset)
             return
 
-        self._offsets[backend_id] = next_offset
+        await self._set_offset(backend_id, next_offset)
 
         # E-1: Confirm processed messages on backend after getting new output
         await self._confirm_processed(backend_id, url, token)
@@ -215,8 +268,10 @@ class OutputPoller:
         for i, part in enumerate(parts):
             # Include shard_index in hash to avoid dedup collision when
             # different shards have identical content (Bug #6).
+            # NOTE: offset deliberately excluded — including it caused dedup
+            # bypass after gateway restart (P0 Bug #11).
             content_hash = hashlib.sha256(
-                f"{backend_id}:{i}:{part}:{self._offsets.get(backend_id, 0)}".encode()
+                f"{backend_id}:{i}:{part}".encode()
             ).hexdigest()
             msg_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
@@ -303,11 +358,12 @@ class OutputPoller:
             pushed_at = datetime.now(timezone.utc).isoformat()
             await self._db.update_outbound_push(msg["id"], "pushed", pushed_at=pushed_at)
 
-    def reset_offset(self, backend_id: str):
+    async def reset_offset(self, backend_id: str):
         """Reset the polling offset for a backend (e.g. after restart)."""
         old = self._offsets.pop(backend_id, 0)
         if old > 0:
             logger.info("Reset output offset for backend %s: %d → 0", backend_id, old)
+            await self._db.save_poll_offset(backend_id, 0)
 
     def stop(self):
         self._running = False

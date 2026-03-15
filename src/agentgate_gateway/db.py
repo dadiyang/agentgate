@@ -1,6 +1,7 @@
 """SQLite WAL message persistence for AgentGate Gateway."""
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -15,7 +16,7 @@ CREATE TABLE IF NOT EXISTS inbound_messages (
     processed_at TEXT,
     channel_type TEXT,
     channel_bot_id TEXT DEFAULT '',
-    group_id TEXT DEFAULT '',
+    chat_id TEXT DEFAULT '',
     group_name TEXT DEFAULT '',
     sender_id TEXT DEFAULT '',
     sender_name TEXT DEFAULT '',
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
     pushed_at TEXT,
     backend_id TEXT,
     channel_type TEXT,
-    group_id TEXT,
+    chat_id TEXT,
     group_name TEXT DEFAULT '',
     content TEXT,
     push_status TEXT DEFAULT 'pending',
@@ -45,6 +46,14 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
     retry_count INTEGER DEFAULT 0,
     error_message TEXT,
     content_hash TEXT
+)
+"""
+
+_CREATE_POLL_OFFSETS = """
+CREATE TABLE IF NOT EXISTS poll_offsets (
+    backend_id TEXT PRIMARY KEY,
+    byte_offset INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT
 )
 """
 
@@ -74,6 +83,7 @@ class MessageDB:
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.execute(_CREATE_INBOUND)
         await self._conn.execute(_CREATE_OUTBOUND)
+        await self._conn.execute(_CREATE_POLL_OFFSETS)
         for idx_sql in _CREATE_INDEXES:
             await self._conn.execute(idx_sql)
         await self._conn.commit()
@@ -92,13 +102,13 @@ class MessageDB:
             """
             INSERT INTO inbound_messages (
                 id, received_at, delivered_at, processed_at,
-                channel_type, channel_bot_id, group_id, group_name,
+                channel_type, channel_bot_id, chat_id, group_name,
                 sender_id, sender_name, content, backend_id,
                 delivery_status, process_status, retry_count,
                 error_message, dedup_key
             ) VALUES (
                 :id, :received_at, :delivered_at, :processed_at,
-                :channel_type, :channel_bot_id, :group_id, :group_name,
+                :channel_type, :channel_bot_id, :chat_id, :group_name,
                 :sender_id, :sender_name, :content, :backend_id,
                 :delivery_status, :process_status, :retry_count,
                 :error_message, :dedup_key
@@ -111,7 +121,7 @@ class MessageDB:
                 "processed_at": msg.get("processed_at"),
                 "channel_type": msg.get("channel_type"),
                 "channel_bot_id": msg.get("channel_bot_id", ""),
-                "group_id": msg.get("group_id", ""),
+                "chat_id": msg.get("chat_id", ""),
                 "group_name": msg.get("group_name", ""),
                 "sender_id": msg.get("sender_id", ""),
                 "sender_name": msg.get("sender_name", ""),
@@ -226,12 +236,12 @@ class MessageDB:
             """
             INSERT INTO outbound_messages (
                 id, fetched_at, pushed_at, backend_id,
-                channel_type, group_id, group_name, content,
+                channel_type, chat_id, group_name, content,
                 push_status, shard_index, shard_total,
                 retry_count, error_message, content_hash
             ) VALUES (
                 :id, :fetched_at, :pushed_at, :backend_id,
-                :channel_type, :group_id, :group_name, :content,
+                :channel_type, :chat_id, :group_name, :content,
                 :push_status, :shard_index, :shard_total,
                 :retry_count, :error_message, :content_hash
             )
@@ -242,7 +252,7 @@ class MessageDB:
                 "pushed_at": msg.get("pushed_at"),
                 "backend_id": msg.get("backend_id"),
                 "channel_type": msg.get("channel_type"),
-                "group_id": msg.get("group_id"),
+                "chat_id": msg.get("chat_id"),
                 "group_name": msg.get("group_name", ""),
                 "content": msg.get("content"),
                 "push_status": msg.get("push_status", "pending"),
@@ -399,3 +409,26 @@ class MessageDB:
             rows = await cursor.fetchall()
 
         return [_row_to_dict(r) for r in rows], total
+
+    # ---- poll offsets ----
+
+    async def load_poll_offsets(self) -> dict[str, int]:
+        """Load all persisted poll offsets. Returns {backend_id: byte_offset}."""
+        assert self._conn is not None, "DB not initialized"
+        async with self._conn.execute("SELECT backend_id, byte_offset FROM poll_offsets") as cursor:
+            rows = await cursor.fetchall()
+        return {row["backend_id"]: row["byte_offset"] for row in rows}
+
+    async def save_poll_offset(self, backend_id: str, byte_offset: int) -> None:
+        """Persist poll offset for a backend (upsert)."""
+        assert self._conn is not None, "DB not initialized"
+        now = datetime.now(timezone.utc).isoformat()
+        await self._conn.execute(
+            """
+            INSERT INTO poll_offsets (backend_id, byte_offset, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(backend_id) DO UPDATE SET byte_offset = ?, updated_at = ?
+            """,
+            (backend_id, byte_offset, now, byte_offset, now),
+        )
+        await self._conn.commit()

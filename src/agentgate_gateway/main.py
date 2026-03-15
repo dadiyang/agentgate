@@ -69,7 +69,7 @@ async def run(config: GatewayConfig) -> None:
     async def on_message(
         channel_type: str,
         bot_id: str,
-        group_id: str,
+        chat_id: str,
         sender_id: str,
         sender_name: str,
         group_name: str,
@@ -77,7 +77,7 @@ async def run(config: GatewayConfig) -> None:
         dedup_key: str,
     ) -> None:
         await inbound.handle_message(
-            channel_type, bot_id, group_id, sender_id, sender_name, group_name, text, dedup_key
+            channel_type, bot_id, chat_id, sender_id, sender_name, group_name, text, dedup_key
         )
 
     # 8. Create channel adapters
@@ -89,7 +89,21 @@ async def run(config: GatewayConfig) -> None:
             config.channels.feishu.app_secret,
             on_message,
         )
-    if config.channels.telegram:
+    if config.channels.telegram_bots:
+        # Multi-bot mode: each bot gets its own adapter keyed by telegram:{bot_id}
+        from agentgate_gateway.adapters.telegram import TelegramAdapter
+
+        for bot_cfg in config.channels.telegram_bots:
+            adapter = TelegramAdapter(
+                bot_cfg.bot_token,
+                on_message,
+                proxy=bot_cfg.proxy,
+                bot_id_override=bot_cfg.bot_id,
+            )
+            adapter_key = f"telegram:{bot_cfg.bot_id}" if bot_cfg.bot_id else f"telegram"
+            adapters[adapter_key] = adapter
+    elif config.channels.telegram:
+        # Single-bot mode (backward compat): keyed as "telegram"
         from agentgate_gateway.adapters.telegram import TelegramAdapter
 
         adapters["telegram"] = TelegramAdapter(
@@ -106,7 +120,7 @@ async def run(config: GatewayConfig) -> None:
 
     # 11. Health prober callbacks
     async def on_recovered(bid: str) -> None:
-        poller.reset_offset(bid)  # Backend restarted — reset output cursor
+        await poller.reset_offset(bid)  # Backend restarted — reset output cursor
         await recovery.on_backend_recovered(bid)
 
     async def on_unhealthy(bid: str) -> None:
