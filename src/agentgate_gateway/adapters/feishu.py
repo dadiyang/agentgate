@@ -14,16 +14,20 @@ logger = logging.getLogger(__name__)
 _STARTUP_CHECK_DELAY = 3.0
 # How often to poll thread liveness when start() blocks
 _LIVENESS_POLL_INTERVAL = 5.0
-# Serialize ws_client_mod.loop monkey-patch across multiple FeishuAdapter instances.
-# Each adapter's _run_ws_blocking sets the module-level loop, then calls start()
-# which captures it internally. The lock ensures no two adapters race on this global.
-_WS_INIT_LOCK = threading.Lock()
+# Counter for staggering multi-app startup to avoid module-level loop race.
+_feishu_instance_count = 0
+_feishu_count_lock = threading.Lock()
 
 
 class FeishuAdapter(ChannelAdapter):
     def __init__(self, app_id: str, app_secret: str, on_message: OnMessageCallback):
         super().__init__(name="feishu", on_message=on_message)
         self._app_id = app_id
+        # Assign startup delay to stagger WS init across instances
+        with _feishu_count_lock:
+            global _feishu_instance_count
+            self._startup_delay = _feishu_instance_count * 5.0
+            _feishu_instance_count += 1
         self._app_secret = app_secret
         self._client = (
             lark.Client.builder()
@@ -40,14 +44,12 @@ class FeishuAdapter(ChannelAdapter):
     async def start(self):
         """Start Feishu WebSocket in a dedicated thread with its own event loop.
 
-        lark-oapi ws.Client.start() is synchronous and internally calls
-        loop.run_until_complete() on a module-level event loop. Running it
-        in the main asyncio thread (even via to_thread) fails because the
-        module-level loop reference points to the already-running main loop.
-
-        Fix: spawn a dedicated thread, create a NEW event loop there, and
-        monkey-patch the module-level ``loop`` before calling start().
+        lark-oapi ws.Client.start() uses a module-level ``loop`` global. Multiple
+        adapters must not race on this global, so they are staggered by 5s each.
         """
+        if self._startup_delay > 0:
+            logger.info("Feishu app %s: waiting %.0fs for staggered startup", self._app_id, self._startup_delay)
+            await asyncio.sleep(self._startup_delay)
         self._loop = asyncio.get_event_loop()
         self._ws_error = None
 
@@ -94,33 +96,9 @@ class FeishuAdapter(ChannelAdapter):
 
         new_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(new_loop)
-        # Monkey-patch the Client instance's start method to use our thread-local
-        # loop instead of the module-level global. This completely avoids the race
-        # condition — each adapter has its own loop and its own start method.
-        _original_connect = self._ws_client._connect
-        _original_disconnect = self._ws_client._disconnect
-        _original_reconnect = self._ws_client._reconnect
-        _original_ping = self._ws_client._ping_loop
-        _auto_reconnect = self._ws_client._auto_reconnect
-
-        async def _select_forever():
-            """Block forever (replacement for module-level _select)."""
-            await asyncio.get_event_loop().create_future()
-
-        def _patched_start():
-            try:
-                new_loop.run_until_complete(_original_connect())
-            except Exception as e:
-                logger.error("Feishu WS connect failed: %s", e, exc_info=True)
-                new_loop.run_until_complete(_original_disconnect())
-                if _auto_reconnect:
-                    new_loop.run_until_complete(_original_reconnect())
-                else:
-                    raise
-            new_loop.create_task(_original_ping())
-            new_loop.run_until_complete(_select_forever())
-
-        self._ws_client.start = _patched_start
+        # Monkey-patch: replace module-level loop so start() uses our fresh loop.
+        # Staggered startup (in async start()) ensures no two adapters race here.
+        ws_client_mod.loop = new_loop
         try:
             self._ws_client.start()
         except Exception as e:
