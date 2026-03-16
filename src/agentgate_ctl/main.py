@@ -212,10 +212,13 @@ def create(name, channel, chat_id, workdir, port, bot_id, claude_command, no_sta
     # 6. Update gateway config: add backend
     if "backends" not in config:
         config["backends"] = {}
+    # default_window = workdir basename (backend creates tmux window with this name)
+    default_window = Path(workdir).name
     config["backends"][name] = {
         "url": f"http://127.0.0.1:{port}",
         "api_token": api_token,
         "agent_type": "claude-code",
+        "default_window": default_window,
     }
 
     # 7. Update gateway config: add route (only if channel specified)
