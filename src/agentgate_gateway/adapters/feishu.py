@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 _STARTUP_CHECK_DELAY = 3.0
 # How often to poll thread liveness when start() blocks
 _LIVENESS_POLL_INTERVAL = 5.0
+# Serialize ws_client_mod.loop monkey-patch across multiple FeishuAdapter instances.
+# Each adapter's _run_ws_blocking sets the module-level loop, then calls start()
+# which captures it internally. The lock ensures no two adapters race on this global.
+_WS_INIT_LOCK = threading.Lock()
 
 
 class FeishuAdapter(ChannelAdapter):
@@ -90,8 +94,15 @@ class FeishuAdapter(ChannelAdapter):
 
         new_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(new_loop)
-        # Monkey-patch: replace module-level loop so start() uses our fresh loop
+        # Monkey-patch module-level loop then immediately call start().
+        # Use lock to ensure set+start are atomic (start() captures the loop
+        # on its first line via loop.run_until_complete). The lock is NOT released
+        # until start() has captured the loop — we release it from a task scheduled
+        # on the loop itself, guaranteeing the loop is already in use.
+        _WS_INIT_LOCK.acquire()
         ws_client_mod.loop = new_loop
+        # Schedule lock release after event loop starts running (= loop captured)
+        new_loop.call_soon(_WS_INIT_LOCK.release)
         try:
             self._ws_client.start()
         except Exception as e:
