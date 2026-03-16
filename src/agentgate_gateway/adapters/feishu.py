@@ -135,7 +135,7 @@ class FeishuAdapter(ChannelAdapter):
                 self_client._conn_url = conn_url
                 self_client._conn_id = conn_id
                 self_client._service_id = service_id
-                _lark_logger.info(self_client._fmt_log("connected to {}", conn_url))
+                logger.info("Feishu WS connected [%s]: conn_id=%s", self._app_id, conn_id)
                 new_loop.create_task(self_client._receive_message_loop())
             except Exception as e:
                 _lark_logger.error(self_client._fmt_log("connect failed: {}", e))
@@ -153,8 +153,12 @@ class FeishuAdapter(ChannelAdapter):
                     new_loop.create_task(self_client._handle_message(msg))
             except Exception as e:
                 _lark_logger.error(self_client._fmt_log("receive message loop exit, err: {}", e))
-                await self_client._disconnect()
+                try:
+                    await self_client._disconnect()
+                except Exception as de:
+                    _lark_logger.error(self_client._fmt_log("disconnect error: {}", de))
                 if self_client._auto_reconnect:
+                    logger.info("Feishu [%s]: auto-reconnecting after receive loop exit", self._app_id)
                     await self_client._reconnect()
                 else:
                     raise
