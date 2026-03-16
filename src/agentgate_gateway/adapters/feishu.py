@@ -93,14 +93,76 @@ class FeishuAdapter(ChannelAdapter):
         raise ConnectionError(f"Feishu WebSocket disconnected: {err}")
 
     def _run_ws_blocking(self):
-        """Run ws.Client.start() in a dedicated thread with its own event loop."""
+        """Run ws.Client.start() in a dedicated thread with its own event loop.
+
+        lark SDK uses a module-level ``loop`` global for create_task() in _connect
+        and _receive_message_loop. With multiple adapters, they overwrite each
+        other's loop causing "Future attached to a different loop" errors.
+
+        Fix: monkey-patch _connect and _receive_message_loop on each Client
+        instance to capture our thread-local loop in a closure, bypassing the
+        module-level global entirely.
+        """
         import lark_oapi.ws.client as ws_client_mod
 
         new_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(new_loop)
-        # Monkey-patch: replace module-level loop so start() uses our fresh loop.
-        # Staggered startup (in async start()) ensures no two adapters race here.
+        # Set module-level loop for start()/run_until_complete calls
         ws_client_mod.loop = new_loop
+
+        # Monkey-patch instance methods to use captured new_loop instead of
+        # the module-level loop (which may be overwritten by other adapters).
+        client = self._ws_client
+        _original_connect = client._connect.__func__
+        _original_recv_loop = client._receive_message_loop.__func__
+        _lark_logger = ws_client_mod.logger
+
+        async def _patched_connect(self_client):
+            """_connect with instance-local loop for create_task."""
+            await self_client._lock.acquire()
+            if self_client._conn is not None:
+                return
+            try:
+                import websockets
+                conn_url = self_client._get_conn_url()
+                from urllib.parse import urlparse, parse_qs
+                u = urlparse(conn_url)
+                q = parse_qs(u.query)
+                conn_id = q["device_id"][0]
+                service_id = q["service_id"][0]
+                conn = await websockets.connect(conn_url)
+                self_client._conn = conn
+                self_client._conn_url = conn_url
+                self_client._conn_id = conn_id
+                self_client._service_id = service_id
+                _lark_logger.info(self_client._fmt_log("connected to {}", conn_url))
+                new_loop.create_task(self_client._receive_message_loop())
+            except Exception as e:
+                _lark_logger.error(self_client._fmt_log("connect failed: {}", e))
+                raise
+            finally:
+                self_client._lock.release()
+
+        async def _patched_recv_loop(self_client):
+            """_receive_message_loop with instance-local loop for create_task."""
+            try:
+                while True:
+                    if self_client._conn is None:
+                        raise Exception("connection is closed")
+                    msg = await self_client._conn.recv()
+                    new_loop.create_task(self_client._handle_message(msg))
+            except Exception as e:
+                _lark_logger.error(self_client._fmt_log("receive message loop exit, err: {}", e))
+                await self_client._disconnect()
+                if self_client._auto_reconnect:
+                    await self_client._reconnect()
+                else:
+                    raise
+
+        import types
+        client._connect = types.MethodType(_patched_connect, client)
+        client._receive_message_loop = types.MethodType(_patched_recv_loop, client)
+
         try:
             self._ws_client.start()
         except Exception as e:
