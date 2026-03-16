@@ -110,7 +110,19 @@ async def run(config: GatewayConfig) -> None:
         )
 
     # 8. Create channel adapters
-    if config.channels.feishu:
+    if config.channels.feishu_apps:
+        # Multi-app mode: each app gets its own adapter keyed by feishu:{app_id}
+        from agentgate_gateway.adapters.feishu import FeishuAdapter
+
+        for app_cfg in config.channels.feishu_apps:
+            adapter = FeishuAdapter(
+                app_cfg.app_id,
+                app_cfg.app_secret,
+                on_message,
+            )
+            adapters[f"feishu:{app_cfg.app_id}"] = adapter
+    elif config.channels.feishu:
+        # Single-app mode (backward compat): keyed as "feishu"
         from agentgate_gateway.adapters.feishu import FeishuAdapter
 
         adapters["feishu"] = FeishuAdapter(
