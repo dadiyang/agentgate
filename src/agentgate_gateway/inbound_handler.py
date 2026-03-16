@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -139,6 +140,7 @@ class InboundHandler:
 
         for attempt in range(MAX_RETRY):
             try:
+                t0 = time.monotonic()
                 resp = await self._http.post(
                     f"{url}/api/inject",
                     json={
@@ -149,12 +151,13 @@ class InboundHandler:
                     },
                     headers={"Authorization": f"Bearer {token}"},
                 )
+                elapsed_ms = (time.monotonic() - t0) * 1000
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("ok"):
                         logger.info(
-                            "Inject ok: backend=%s msg_id=%s delivery_id=%s",
-                            backend_id, msg_id, data.get("delivery_id"),
+                            "Inject ok: backend=%s msg_id=%s delivery_id=%s elapsed=%.0fms",
+                            backend_id, msg_id, data.get("delivery_id"), elapsed_ms,
                         )
                         now = datetime.now(timezone.utc).isoformat()
                         await self._db.update_inbound_delivery(

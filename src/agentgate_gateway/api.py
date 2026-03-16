@@ -57,6 +57,11 @@ class GatewayAPI:
             return _json({"ok": False, "error": "bad_request", "msg": "Invalid JSON body"}, 400)
 
         backend_id = body.get("backend_id", "").strip()
+        logger.info(
+            "HTTP inbound: backend_id=%s sender=%s text=%s",
+            backend_id, body.get("sender_name", body.get("sender_id", "?")),
+            (body.get("text", "") or "")[:80],
+        )
         if not backend_id:
             return _json({"ok": False, "error": "bad_request", "msg": "backend_id required"}, 400)
 

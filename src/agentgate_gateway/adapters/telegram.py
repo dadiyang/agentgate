@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 
 from telegram import Update
 from telegram.ext import (
@@ -78,12 +79,14 @@ class TelegramAdapter(ChannelAdapter):
     async def _handle_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ):
+        user = update.effective_message.from_user if update.effective_message else None
         logger.info(
-            "TG inbound [%s]: update_id=%s chat_id=%s text=%s",
+            "TG inbound [%s]: update_id=%s chat_id=%s sender=%s text=%s",
             self._bot_username,
             update.update_id,
             update.effective_chat.id if update.effective_chat else "?",
-            (update.effective_message.text or "")[:50] if update.effective_message else "(no msg)",
+            (user.full_name or user.username or str(user.id)) if user else "?",
+            (update.effective_message.text or "")[:80] if update.effective_message else "(no msg)",
         )
         if self._test_disconnected:
             return
@@ -114,30 +117,37 @@ class TelegramAdapter(ChannelAdapter):
             "TG outbound [%s]: chat_id=%s len=%d text=%s",
             self._bot_username, chat_id, len(text), text[:80],
         )
+        t0 = time.monotonic()
         try:
             await self._app.bot.send_message(
                 chat_id=int(chat_id),
                 text=text,
                 parse_mode="HTML",
             )
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            logger.info("TG send ok [%s]: chat_id=%s elapsed=%.0fms", self._bot_username, chat_id, elapsed_ms)
             return True
         except Exception as e:
+            elapsed_ms = (time.monotonic() - t0) * 1000
             # HTML parse failure (e.g. "<根因>" treated as tag) — fallback to plain text
             err_msg = str(e).lower()
             if "parse entities" in err_msg or "can't parse" in err_msg:
                 logger.warning(
-                    "Telegram HTML parse failed, retrying as plain text: %s", e,
+                    "TG HTML parse failed [%s]: %s elapsed=%.0fms, retrying plain text",
+                    self._bot_username, e, elapsed_ms,
                 )
+                t1 = time.monotonic()
                 try:
                     await self._app.bot.send_message(
                         chat_id=int(chat_id),
                         text=text,
                     )
+                    logger.info("TG send ok (plain) [%s]: chat_id=%s elapsed=%.0fms", self._bot_username, chat_id, (time.monotonic() - t1) * 1000)
                     return True
                 except Exception as e2:
-                    logger.error("Telegram plain text send also failed: %s", e2, exc_info=True)
+                    logger.error("TG plain text send failed [%s]: %s", self._bot_username, e2, exc_info=True)
                     return False
-            logger.error("Telegram send failed: %s", e, exc_info=True)
+            logger.error("TG send failed [%s]: chat_id=%s %s elapsed=%.0fms", self._bot_username, chat_id, e, elapsed_ms, exc_info=True)
             return False
 
     def _real_is_connected(self) -> bool:

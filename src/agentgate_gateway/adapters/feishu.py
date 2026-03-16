@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
@@ -79,7 +80,7 @@ class FeishuAdapter(ChannelAdapter):
             raise ConnectionError(f"Feishu WebSocket startup failed: {err}")
 
         self._connected = True
-        logger.info("Feishu WebSocket connected")
+        logger.info("Feishu WebSocket connected [%s]", self._app_id)
 
         # Block until thread exits (adapter_run_loop expects start() to block)
         while self._ws_thread.is_alive():
@@ -87,6 +88,7 @@ class FeishuAdapter(ChannelAdapter):
 
         # Thread exited = connection lost
         self._connected = False
+        logger.warning("Feishu WebSocket disconnected [%s]", self._app_id)
         err = self._ws_error or ConnectionError("Feishu WebSocket connection lost")
         raise ConnectionError(f"Feishu WebSocket disconnected: {err}")
 
@@ -133,15 +135,25 @@ class FeishuAdapter(ChannelAdapter):
 
         lark-oapi v1.5+ passes a single P2ImMessageReceiveV1 event object.
         """
-        if self._test_disconnected:
-            return
         try:
             msg = event.event.message
             sender = event.event.sender
+            # Raw event log — first line before any filtering
+            logger.info(
+                "Feishu raw event [%s]: msg_id=%s chat_id=%s sender_type=%s msg_type=%s content=%s",
+                self._app_id, msg.message_id, msg.chat_id,
+                sender.sender_type, msg.message_type,
+                (msg.content or "")[:80],
+            )
+            if self._test_disconnected:
+                logger.debug("Feishu [%s]: test_disconnected, dropping", self._app_id)
+                return
             # Ignore non-user messages to prevent bot-to-bot loops in multi-app groups
             if sender.sender_type != "user":
+                logger.debug("Feishu [%s]: ignoring non-user sender_type=%s", self._app_id, sender.sender_type)
                 return
             if msg.message_type != "text":
+                logger.debug("Feishu [%s]: ignoring msg_type=%s", self._app_id, msg.message_type)
                 return
             content = json.loads(msg.content).get("text", "")
             chat_id = msg.chat_id
@@ -165,7 +177,7 @@ class FeishuAdapter(ChannelAdapter):
                     self._loop,
                 )
         except Exception as e:
-            logger.error("Feishu event error: %s", e, exc_info=True)
+            logger.error("Feishu event callback error [%s]: %s", self._app_id, e, exc_info=True)
 
     async def _real_send_message(self, chat_id: str, text: str) -> bool:
         logger.info(
@@ -200,14 +212,18 @@ class FeishuAdapter(ChannelAdapter):
             )
             .build()
         )
+        t0 = time.monotonic()
         response = await asyncio.to_thread(
             self._client.im.v1.message.create, request
         )
+        elapsed_ms = (time.monotonic() - t0) * 1000
         if not response.success():
             logger.error(
-                "Feishu send failed: %s %s", response.code, response.msg
+                "Feishu send failed [%s]: chat_id=%s code=%s msg=%s elapsed=%.0fms",
+                self._app_id, chat_id, response.code, response.msg, elapsed_ms,
             )
             return False
+        logger.info("Feishu send ok [%s]: chat_id=%s elapsed=%.0fms", self._app_id, chat_id, elapsed_ms)
         return True
 
     def _real_is_connected(self) -> bool:
