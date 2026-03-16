@@ -138,6 +138,9 @@ class FeishuAdapter(ChannelAdapter):
         try:
             msg = event.event.message
             sender = event.event.sender
+            # Ignore non-user messages to prevent bot-to-bot loops in multi-app groups
+            if sender.sender_type != "user":
+                return
             if msg.message_type != "text":
                 return
             content = json.loads(msg.content).get("text", "")
