@@ -94,15 +94,33 @@ class FeishuAdapter(ChannelAdapter):
 
         new_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(new_loop)
-        # Monkey-patch module-level loop then immediately call start().
-        # Use lock to ensure set+start are atomic (start() captures the loop
-        # on its first line via loop.run_until_complete). The lock is NOT released
-        # until start() has captured the loop — we release it from a task scheduled
-        # on the loop itself, guaranteeing the loop is already in use.
-        _WS_INIT_LOCK.acquire()
-        ws_client_mod.loop = new_loop
-        # Schedule lock release after event loop starts running (= loop captured)
-        new_loop.call_soon(_WS_INIT_LOCK.release)
+        # Monkey-patch the Client instance's start method to use our thread-local
+        # loop instead of the module-level global. This completely avoids the race
+        # condition — each adapter has its own loop and its own start method.
+        _original_connect = self._ws_client._connect
+        _original_disconnect = self._ws_client._disconnect
+        _original_reconnect = self._ws_client._reconnect
+        _original_ping = self._ws_client._ping_loop
+        _auto_reconnect = self._ws_client._auto_reconnect
+
+        async def _select_forever():
+            """Block forever (replacement for module-level _select)."""
+            await asyncio.get_event_loop().create_future()
+
+        def _patched_start():
+            try:
+                new_loop.run_until_complete(_original_connect())
+            except Exception as e:
+                logger.error("Feishu WS connect failed: %s", e, exc_info=True)
+                new_loop.run_until_complete(_original_disconnect())
+                if _auto_reconnect:
+                    new_loop.run_until_complete(_original_reconnect())
+                else:
+                    raise
+            new_loop.create_task(_original_ping())
+            new_loop.run_until_complete(_select_forever())
+
+        self._ws_client.start = _patched_start
         try:
             self._ws_client.start()
         except Exception as e:
