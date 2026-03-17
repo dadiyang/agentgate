@@ -86,9 +86,10 @@ async def run(config: BackendConfig) -> None:
                 "No working windows found — bootstrapping Claude Code in %s",
                 work_dir,
             )
+            default_window = config.initial_window_name or work_dir.name
             ok, msg, wname, wid = await tmux.create_window(
                 work_dir=str(work_dir),
-                window_name="main",
+                window_name=default_window,
                 start_claude=True,
             )
             if ok:

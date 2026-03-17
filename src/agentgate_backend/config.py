@@ -22,6 +22,7 @@ class BackendConfig(BaseSettings):
     work_dir: Path = Path.home()
     tmux_session_name: str = "agentgate"
     tmux_main_window_name: str = "__main__"
+    initial_window_name: str = ""  # Default: work_dir basename
     claude_command: str = "claude"
     process_name: str = "claude"
 

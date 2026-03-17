@@ -5,6 +5,8 @@
 #
 # 配合 blocked-subagents.conf 使用（每行一个被禁的 subagent_type 模式）。
 
+source "$(dirname "$0")/hook-log.sh"
+
 CONF_FILE="$(dirname "$0")/blocked-subagents.conf"
 if [[ ! -f "$CONF_FILE" ]]; then
     exit 0
@@ -29,11 +31,13 @@ print(d.get('tool_input',{}).get('subagent_type',''))
 mapfile -t BLOCKED < <(grep -v '^#' "$CONF_FILE" | grep -v '^$')
 
 if [[ ${#BLOCKED[@]} -eq 0 ]]; then
+    hook_log "subagent" "PASS" "$subagent_type"
     exit 0
 fi
 
 for pattern in "${BLOCKED[@]}"; do
     if [[ "$subagent_type" == "$pattern" ]]; then
+        hook_log "subagent" "BLOCK" "$subagent_type"
         echo "BLOCKED: 禁止用 subagent 替代 '$pattern' 角色——该角色有独立 ccbot 实例在运行。"
         echo "正确做法：send-to <角色名> \"你的指令\"。例如：send-to dev \"请实现 F1 功能\""
         echo "用 send-to --list 查看所有可用角色。"
@@ -41,4 +45,5 @@ for pattern in "${BLOCKED[@]}"; do
     fi
 done
 
+hook_log "subagent" "PASS" "$subagent_type"
 exit 0
