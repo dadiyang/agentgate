@@ -114,12 +114,15 @@ class OutputPoller:
     async def _seed_offset(self, backend_id: str, url: str, token: str, window: str):
         """Fetch backend's current output position without processing messages.
 
-        Used on first encounter (new instance or DB lost) to avoid replaying
-        all historical output. Sets offset to the backend's current end position.
+        Used on first encounter (new instance or DB lost) and after session reset
+        to skip historical output. Uses a very large since value so the response
+        is small (0 messages) but next_offset reveals the current file size.
         """
         try:
+            # Use a huge since value to avoid pulling full history.
+            # Backend returns 0 messages but next_offset = current file size.
             resp = await self._http.get(
-                f"{url}/api/output/{window}?since=0",
+                f"{url}/api/output/{window}?since=999999999999",
                 headers={"Authorization": f"Bearer {token}"},
             )
             if resp.status_code == 200:
@@ -128,14 +131,19 @@ class OutputPoller:
                     pos = data.get("next_offset", 0)
                     await self._set_offset(backend_id, pos)
                     logger.info(
-                        "Seeded offset for new backend %s: %d (skipping history)",
+                        "Seeded offset for backend %s: %d (skipping history)",
                         backend_id, pos,
                     )
                     return
+            # Window not found (404) is expected for new instances
+            if resp.status_code == 404:
+                logger.info("Seed %s: window not found (new instance), offset=0", backend_id)
+                await self._set_offset(backend_id, 0)
+                return
+            logger.warning("Seed %s: unexpected HTTP %d", backend_id, resp.status_code)
         except Exception as e:
             logger.error("Failed to seed offset for %s: %s", backend_id, e, exc_info=True)
-        # Fallback: set to 0 so we don't retry seeding every cycle,
-        # but content_hash dedup will prevent duplicate pushes.
+        # Fallback: set to 0 so we don't retry seeding every cycle.
         await self._set_offset(backend_id, 0)
 
     async def _poll_backend(self, backend_id: str, backend):
