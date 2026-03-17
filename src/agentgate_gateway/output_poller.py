@@ -62,7 +62,7 @@ class OutputPoller:
         self._poll_interval = poll_interval
         self._alert_manager = alert_manager
         self._offsets: dict[str, int] = {}  # backend_id -> byte offset
-        self._http = httpx.AsyncClient(timeout=10)
+        self._http = httpx.AsyncClient(timeout=30)
         self._running = True
 
     async def close(self):
@@ -90,13 +90,21 @@ class OutputPoller:
     async def run(self):
         """Main polling loop."""
         await self.restore_offsets()
+        # Track unhealthy skips to avoid log spam (log once per transition)
+        _last_unhealthy: set[str] = set()
         while self._running:
             for backend_id, backend in list(self._backends.items()):
                 status = getattr(backend, "status", None)
                 if status is None and isinstance(backend, dict):
                     status = backend.get("status", "unknown")
                 if status == "unhealthy":
+                    if backend_id not in _last_unhealthy:
+                        logger.info("Skipping unhealthy backend %s (will resume when healthy)", backend_id)
+                        _last_unhealthy.add(backend_id)
                     continue
+                if backend_id in _last_unhealthy:
+                    logger.info("Backend %s no longer unhealthy, resuming polling", backend_id)
+                    _last_unhealthy.discard(backend_id)
                 try:
                     await self._poll_backend(backend_id, backend)
                 except Exception as e:
@@ -155,33 +163,28 @@ class OutputPoller:
             headers={"Authorization": f"Bearer {token}"},
         )
         if resp.status_code != 200:
+            logger.warning("Poll %s: HTTP %d (offset=%d)", backend_id, resp.status_code, offset)
             return
         data = resp.json()
         if not data.get("ok"):
+            logger.warning("Poll %s: response not ok: %s", backend_id, data.get("error", data.get("msg", "?")))
             return
 
         next_offset = data.get("next_offset", offset)
 
         # Detect backend restart: next_offset < current offset means the
-        # backend's output counter was reset (Bug #9). Re-poll from 0.
+        # backend's output counter was reset (session file replaced).
+        # Seed to current position instead of re-polling from 0 — avoids
+        # pulling entire history (could be 25MB+) which causes timeouts
+        # and blocks the poller for minutes.
         if next_offset < offset:
             logger.warning(
                 "Backend %s output counter reset detected "
-                "(next_offset=%d < since=%d) — re-polling from 0",
+                "(next_offset=%d < since=%d) — seeding to current position",
                 backend_id, next_offset, offset,
             )
-            await self._set_offset(backend_id, 0)
-            # Re-fetch from offset 0 to pick up any output generated after restart
-            resp = await self._http.get(
-                f"{url}/api/output/{window}?since=0",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            if resp.status_code != 200:
-                return
-            data = resp.json()
-            if not data.get("ok"):
-                return
-            next_offset = data.get("next_offset", 0)
+            await self._set_offset(backend_id, next_offset)
+            return
 
         msg_count = data.get("count", 0)
         if msg_count == 0:
