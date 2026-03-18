@@ -21,6 +21,9 @@ _LIVENESS_POLL_INTERVAL = 5.0
 # already handles truly dead connections, so we only need this for the
 # "alive but not delivering" case.
 _MAX_CONNECTION_AGE = 1800  # 30 minutes
+# Drop inbound messages older than this (seconds).  After periodic reconnect,
+# Feishu may re-deliver old messages with new msg_ids that bypass dedup.
+_MAX_MESSAGE_AGE = 300  # 5 minutes
 # Counter for staggering multi-app startup to avoid module-level loop race.
 _feishu_instance_count = 0
 _feishu_count_lock = threading.Lock()
@@ -252,6 +255,18 @@ class FeishuAdapter(ChannelAdapter):
                 sender.sender_type, msg.message_type,
                 (msg.content or "")[:80],
             )
+            # Drop stale messages re-delivered after reconnect (new msg_id bypasses dedup)
+            if msg.create_time:
+                try:
+                    msg_age = time.time() - int(msg.create_time) / 1000
+                    if msg_age > _MAX_MESSAGE_AGE:
+                        logger.warning(
+                            "Feishu [%s]: dropping stale message (age=%.0fs): msg_id=%s content=%s",
+                            self._app_id, msg_age, msg.message_id, (msg.content or "")[:60],
+                        )
+                        return
+                except (ValueError, TypeError):
+                    pass  # Can't parse create_time, let it through
             if self._test_disconnected:
                 logger.debug("Feishu [%s]: test_disconnected, dropping", self._app_id)
                 return
