@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 _STARTUP_CHECK_DELAY = 3.0
 # How often to poll thread liveness when start() blocks
 _LIVENESS_POLL_INTERVAL = 5.0
+# Force reconnect after this age regardless of connection health.
+# Mitigates server-side bug where connection is alive (pongs work) but
+# messages are not delivered.  websockets' built-in keepalive (20s ping/pong)
+# already handles truly dead connections, so we only need this for the
+# "alive but not delivering" case.
+_MAX_CONNECTION_AGE = 1800  # 30 minutes
 # Counter for staggering multi-app startup to avoid module-level loop race.
 _feishu_instance_count = 0
 _feishu_count_lock = threading.Lock()
@@ -41,6 +47,8 @@ class FeishuAdapter(ChannelAdapter):
         self._ws_thread: threading.Thread | None = None
         self._ws_error: Exception | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._ws_loop: asyncio.AbstractEventLoop | None = None
+        self._connected_at: float = 0.0
 
     async def start(self):
         """Start Feishu WebSocket in a dedicated thread with its own event loop.
@@ -80,11 +88,26 @@ class FeishuAdapter(ChannelAdapter):
             raise ConnectionError(f"Feishu WebSocket startup failed: {err}")
 
         self._connected = True
+        self._connected_at = time.monotonic()
         logger.info("Feishu WebSocket connected [%s]", self._app_id)
 
         # Block until thread exits (adapter_run_loop expects start() to block)
         while self._ws_thread.is_alive():
             await asyncio.sleep(_LIVENESS_POLL_INTERVAL)
+
+            # Periodic reconnect: mitigates server-side bug where connection is
+            # alive (pongs work) but messages stop being delivered.
+            # Dead connections are already handled by websockets' built-in
+            # keepalive (ping_interval=20s, ping_timeout=20s).
+            age = time.monotonic() - self._connected_at
+            if age > _MAX_CONNECTION_AGE:
+                logger.info(
+                    "Feishu [%s]: connection age %.0fs exceeds %ds, periodic reconnect",
+                    self._app_id, age, _MAX_CONNECTION_AGE,
+                )
+                self._force_close_ws()
+                self._connected_at = time.monotonic()
+                continue
 
         # Thread exited = connection lost
         self._connected = False
@@ -109,20 +132,23 @@ class FeishuAdapter(ChannelAdapter):
         asyncio.set_event_loop(new_loop)
         # Set module-level loop for start()/run_until_complete calls
         ws_client_mod.loop = new_loop
+        self._ws_loop = new_loop
 
-        # Monkey-patch instance methods to use captured new_loop instead of
-        # the module-level loop (which may be overwritten by other adapters).
+        # Monkey-patch _connect and _receive_message_loop to use the captured
+        # new_loop instead of the module-level loop (overwritten by other adapters).
         client = self._ws_client
-        _original_connect = client._connect.__func__
-        _original_recv_loop = client._receive_message_loop.__func__
         _lark_logger = ws_client_mod.logger
 
         async def _patched_connect(self_client):
-            """_connect with instance-local loop for create_task."""
+            """_connect with instance-local loop for create_task.
+
+            Also fixes a lock leak in the original SDK: the early return when
+            _conn is not None must release the lock (moved into try/finally).
+            """
             await self_client._lock.acquire()
-            if self_client._conn is not None:
-                return
             try:
+                if self_client._conn is not None:
+                    return
                 import websockets
                 conn_url = self_client._get_conn_url()
                 from urllib.parse import urlparse, parse_qs
@@ -135,6 +161,7 @@ class FeishuAdapter(ChannelAdapter):
                 self_client._conn_url = conn_url
                 self_client._conn_id = conn_id
                 self_client._service_id = service_id
+                self._connected_at = time.monotonic()
                 logger.info("Feishu WS connected [%s]: conn_id=%s", self._app_id, conn_id)
                 new_loop.create_task(self_client._receive_message_loop())
             except Exception as e:
@@ -179,14 +206,28 @@ class FeishuAdapter(ChannelAdapter):
             except Exception:
                 pass
 
+    def _force_close_ws(self):
+        """Force close WS connection to trigger recv loop exit → auto reconnect.
+
+        Schedules an async close on the WS thread's event loop.  When the
+        underlying connection closes, recv() raises ConnectionClosed, which the
+        patched recv loop catches and feeds into the SDK's reconnect flow.
+        """
+        ws_loop = self._ws_loop
+        conn = getattr(self._ws_client, "_conn", None) if self._ws_client else None
+        if ws_loop and not ws_loop.is_closed() and conn:
+            async def _close():
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
+            asyncio.run_coroutine_threadsafe(_close(), ws_loop)
+
     async def stop(self):
         self._connected = False
-        # The WS thread is a daemon thread; closing the internal connection
-        # will cause start() to exit, or the thread will be killed at process exit.
         if self._ws_client:
             try:
-                import lark_oapi.ws.client as ws_client_mod
-                ws_loop = ws_client_mod.loop
+                ws_loop = self._ws_loop
                 conn = getattr(self._ws_client, "_conn", None)
                 if conn and ws_loop and not ws_loop.is_closed():
                     future = asyncio.run_coroutine_threadsafe(conn.close(), ws_loop)
