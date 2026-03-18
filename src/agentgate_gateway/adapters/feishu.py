@@ -23,7 +23,7 @@ _LIVENESS_POLL_INTERVAL = 5.0
 _MAX_CONNECTION_AGE = 1800  # 30 minutes
 # Drop inbound messages older than this (seconds).  After periodic reconnect,
 # Feishu may re-deliver old messages with new msg_ids that bypass dedup.
-_MAX_MESSAGE_AGE = 300  # 5 minutes
+_MAX_MESSAGE_AGE = 3600  # 1 hour
 # Counter for staggering multi-app startup to avoid module-level loop race.
 _feishu_instance_count = 0
 _feishu_count_lock = threading.Lock()
