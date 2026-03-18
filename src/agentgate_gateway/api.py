@@ -89,6 +89,9 @@ class GatewayAPI:
         # Go through full pipeline (persist → inject to backend)
         # HTTP channel bypasses routing — backend_id is explicit
         # M-6: Pass message_id so DB and API response use the same ID
+        # fire_and_forget=True: persist immediately, inject in background.
+        # This prevents send-to from timing out when backend inject retries.
+        t0 = time.monotonic()
         await self._inbound.handle_message(
             channel_type="http",
             bot_id="",
@@ -100,7 +103,10 @@ class GatewayAPI:
             dedup_key=dedup_key,
             target_backend_id=backend_id,
             message_id=message_id,
+            fire_and_forget=True,
         )
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info("HTTP inject accepted: backend=%s msg_id=%s elapsed=%.0fms", backend_id, message_id, elapsed_ms)
 
         return _json({"ok": True, "message_id": message_id, "backend_id": backend_id}, 200)
 

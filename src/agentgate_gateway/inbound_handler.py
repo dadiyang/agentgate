@@ -47,12 +47,16 @@ class InboundHandler:
         dedup_key: str,
         target_backend_id: str | None = None,
         message_id: str | None = None,
+        fire_and_forget: bool = False,
     ):
         """Called by channel adapters when a message arrives.
 
         target_backend_id: When set (e.g. HTTP channel), skip route matching
         and inject directly to the specified backend.
         message_id: When set, use this ID instead of generating a new UUID.
+        fire_and_forget: When True, persist the message and start injection
+        in a background task instead of awaiting it.  Used by the HTTP inject
+        endpoint so the caller gets a fast response.
         """
         logger.info(
             "Inbound: channel=%s bot=%s chat=%s sender=%s text=%s",
@@ -101,9 +105,14 @@ class InboundHandler:
         )
 
         # 4. Inject to backend with retry
-        await self._inject_with_retry(
-            msg_id, backend_id, text, sender_name, channel_type, chat_id
-        )
+        if fire_and_forget:
+            asyncio.create_task(self._inject_with_retry(
+                msg_id, backend_id, text, sender_name, channel_type, chat_id
+            ))
+        else:
+            await self._inject_with_retry(
+                msg_id, backend_id, text, sender_name, channel_type, chat_id
+            )
 
     async def _inject_with_retry(
         self,
@@ -173,10 +182,11 @@ class InboundHandler:
                 )
             except Exception as e:
                 logger.error(
-                    "Inject attempt %d/%d error: %s",
+                    "Inject attempt %d/%d error: %s: %s",
                     attempt + 1,
                     MAX_RETRY,
-                    e,
+                    type(e).__name__,
+                    e or "(no detail)",
                     exc_info=True,
                 )
 
