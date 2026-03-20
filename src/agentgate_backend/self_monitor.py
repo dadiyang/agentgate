@@ -342,7 +342,7 @@ class SelfMonitor:
             await self._tmux.send_keys(wid, restart_cmd, enter=True, literal=True)
             # Accept trust dialog if it appears
             if self._agent_driver is not None:
-                await self._agent_driver.accept_startup_prompts(self._tmux, wid)
+                await self._agent_driver.accept_startup_prompts(wid)
             else:
                 await self._tmux._accept_trust_dialog(wid)
             logger.info("SelfMonitor: sent restart commands to window %s", wid)
