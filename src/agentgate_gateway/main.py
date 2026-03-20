@@ -65,10 +65,10 @@ def main(config_path, port, test_mode):
         config.port = port
     if test_mode:
         config.test_mode = True
-    asyncio.run(run(config))
+    asyncio.run(run(config, config_path=Path(config_path)))
 
 
-async def run(config: GatewayConfig) -> None:
+async def run(config: GatewayConfig, config_path: Path | None = None) -> None:
     """Async main: wire up all components and start the gateway."""
 
     # 1. Init DB
@@ -242,9 +242,44 @@ async def run(config: GatewayConfig) -> None:
     tasks.append(asyncio.create_task(poller.run(), name="output-poller"))
     tasks.append(asyncio.create_task(prober.run(), name="health-prober"))
 
-    # 15. Wait for shutdown signal
-    stop = asyncio.Event()
+    # 15. SIGHUP handler for config hot-reload (routes + backends)
+    def handle_sighup():
+        """Reload config.yaml on SIGHUP — updates routes and backends without restart."""
+        if config_path is None:
+            logger.warning("SIGHUP received but no config_path — cannot reload")
+            return
+        try:
+            new_config = GatewayConfig.from_yaml(config_path)
+
+            # Reload routes
+            old_count = len(router._forward)
+            new_count = router.reload(new_config.routes)
+            logger.info("SIGHUP: routes reloaded (%d → %d)", old_count, new_count)
+
+            # Reload backends (add new, update existing, keep runtime state)
+            added, updated = 0, 0
+            for bid, bc in new_config.backends.items():
+                if bid in backend_states:
+                    bs = backend_states[bid]
+                    bs.url = bc.url
+                    bs.api_token = bc.api_token
+                    bs.default_window = bc.default_window
+                    updated += 1
+                else:
+                    backend_states[bid] = BackendState(
+                        url=bc.url, api_token=bc.api_token, default_window=bc.default_window,
+                    )
+                    added += 1
+            logger.info("SIGHUP: backends updated=%d added=%d", updated, added)
+
+        except Exception as e:
+            logger.error("SIGHUP: reload failed: %s", e, exc_info=True)
+
     loop = asyncio.get_event_loop()
+    loop.add_signal_handler(signal.SIGHUP, handle_sighup)
+
+    # 16. Wait for shutdown signal
+    stop = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     await stop.wait()

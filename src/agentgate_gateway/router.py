@@ -41,3 +41,16 @@ class Router:
     def reverse_lookup(self, backend_id: str) -> list[tuple[str, str, str]]:
         """For outbound: find all channel bindings for a backend."""
         return list(self._reverse.get(backend_id, []))
+
+    def reload(self, routes: list[RouteConfig]) -> int:
+        """Replace routing table in-place. Returns number of routes loaded."""
+        forward: dict[tuple[str, str, str], str] = {}
+        reverse: dict[str, list[tuple[str, str, str]]] = {}
+        for route in routes:
+            key = (route.channel, route.bot_id, route.chat_id)
+            forward[key] = route.backend
+            reverse.setdefault(route.backend, []).append(key)
+        self._forward = forward
+        self._reverse = reverse
+        logger.info("Router reloaded: %d routes", len(forward))
+        return len(forward)
