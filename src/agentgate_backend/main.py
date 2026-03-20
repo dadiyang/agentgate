@@ -38,6 +38,63 @@ def main(name: str, port: int | None, work_dir: str | None) -> None:
 
 
 async def run(config: BackendConfig) -> None:
+    if config.agent_type == "opencode":
+        await run_opencode(config)
+    else:
+        await run_claude_code(config)
+
+
+async def run_opencode(config: BackendConfig) -> None:
+    """Run backend in OpenCode mode (subprocess, no tmux)."""
+    from agentgate_backend.heartbeat import write_heartbeat
+    from agentgate_backend.inject_server import start_server_opencode
+    from agentgate_backend.opencode_driver import OpenCodeDriver
+
+    opencode_cmd = config.claude_command if config.claude_command != "claude" else "opencode"
+
+    driver = OpenCodeDriver(
+        work_dir=str(config.work_dir),
+        opencode_cmd=opencode_cmd,
+        model=config.opencode_model,
+    )
+
+    runner = await start_server_opencode(
+        driver=driver,
+        api_token=config.api_token,
+        port=config.http_port,
+    )
+
+    heartbeat_path = (
+        Path.home() / ".agentgate" / "heartbeat" / f"{config.name}.json"
+    )
+
+    logger.info(
+        "Backend '%s' started on port %d (agent_type=opencode, model=%s)",
+        config.name, config.http_port, config.opencode_model or "default",
+    )
+
+    stop = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+
+    async def heartbeat_loop() -> None:
+        while not stop.is_set():
+            write_heartbeat(heartbeat_path)
+            await asyncio.sleep(30)
+
+    heartbeat_task = asyncio.create_task(heartbeat_loop())
+
+    await stop.wait()
+
+    logger.info("Shutting down backend '%s'...", config.name)
+    await driver.stop()
+    heartbeat_task.cancel()
+    await runner.cleanup()
+
+
+async def run_claude_code(config: BackendConfig) -> None:
+    """Run backend in Claude Code mode (tmux, original logic)."""
     from agentgate_backend.delivery_tracker import DeliveryTracker
     from agentgate_backend.heartbeat import write_heartbeat
     from agentgate_backend.inject_server import start_server

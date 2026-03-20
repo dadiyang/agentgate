@@ -394,7 +394,7 @@ async def start_server(
     self_monitor: SelfMonitor | None = None,
     message_store: MessageStore | None = None,
 ) -> web.AppRunner:
-    """Start the HTTP server. Returns runner for lifecycle management."""
+    """Start the HTTP server (Claude Code mode). Returns runner for lifecycle management."""
     global _startup_time
     _startup_time = time.monotonic()
 
@@ -411,4 +411,109 @@ async def start_server(
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
     logger.info("HTTP inject server started on 127.0.0.1:%d", port)
+    return runner
+
+
+# ------------------------------------------------------------------
+#  OpenCode mode — lightweight server using OpenCodeDriver
+# ------------------------------------------------------------------
+
+
+def create_opencode_app(
+    *,
+    driver,  # OpenCodeDriver
+    api_token: str = "",
+) -> web.Application:
+    """Create aiohttp app for OpenCode backend mode."""
+
+    async def health_handler(request: web.Request) -> web.Response:
+        err = _check_auth(request, api_token)
+        if err:
+            return err
+        health = driver.get_health()
+        return web.json_response({
+            "status": "ok",
+            "windows": [{
+                "window_id": "opencode",
+                "window_name": "opencode",
+                "pane_command": "opencode",
+                "session_id": health.get("session_id", ""),
+                "pending_deliveries": health.get("queue_size", 0),
+            }],
+            "uptime_seconds": int(time.monotonic() - _startup_time),
+            "watchdog_enabled": False,
+            "window_health": {},
+            "opencode": health,
+        })
+
+    async def inject_handler(request: web.Request) -> web.Response:
+        err = _check_auth(request, api_token)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
+                status=400,
+            )
+
+        text = body.get("text", "")
+        message_id = body.get("message_id", "")
+        if not text:
+            return web.json_response(
+                {"ok": False, "error": "bad_request", "msg": "text required"},
+                status=400,
+            )
+
+        result = await driver.inject(text, message_id=message_id or None)
+
+        logger.info(
+            "HTTP inject (opencode): message_id=%s len=%d queued=%s",
+            message_id or "none", len(text), result.get("queued", False),
+        )
+
+        return web.json_response({
+            "ok": True,
+            "delivery_id": message_id or None,
+            "window_id": "opencode",
+            "message_id": message_id or None,
+            "msg": "Injected" if not result.get("queued") else "Queued",
+        })
+
+    async def output_handler(request: web.Request) -> web.Response:
+        err = _check_auth(request, api_token)
+        if err:
+            return err
+        # window_name is ignored — opencode mode has a single virtual window
+        since = int(request.query.get("since", "0"))
+        result = driver.get_output(since)
+        result["window_name"] = "opencode"
+        result["window_id"] = "opencode"
+        return web.json_response(result)
+
+    app = web.Application()
+    app.router.add_get("/api/health", health_handler)
+    app.router.add_post("/api/inject", inject_handler)
+    app.router.add_get("/api/output/{window_name}", output_handler)
+
+    return app
+
+
+async def start_server_opencode(
+    *,
+    driver,  # OpenCodeDriver
+    api_token: str = "",
+    port: int = 8901,
+) -> web.AppRunner:
+    """Start the HTTP server (OpenCode mode). Returns runner for lifecycle management."""
+    global _startup_time
+    _startup_time = time.monotonic()
+
+    app = create_opencode_app(driver=driver, api_token=api_token)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    logger.info("HTTP inject server (opencode) started on 127.0.0.1:%d", port)
     return runner

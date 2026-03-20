@@ -20,11 +20,13 @@ class BackendConfig(BaseSettings):
     port: int = 8901
     api_token: str = ""
     work_dir: Path = Path.home()
+    agent_type: str = "claude-code"  # "claude-code" or "opencode"
     tmux_session_name: str = "agentgate"
     tmux_main_window_name: str = "__main__"
     initial_window_name: str = ""  # Default: work_dir basename
     claude_command: str = "claude"
     process_name: str = "claude"
+    opencode_model: str = ""  # Model for opencode agent (e.g. "dashscope/qwen-plus")
 
     # SelfMonitor
     monitor_interval: int = 30
