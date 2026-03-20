@@ -38,123 +38,64 @@ def main(name: str, port: int | None, work_dir: str | None) -> None:
 
 
 async def run(config: BackendConfig) -> None:
-    if config.agent_type == "opencode":
-        await run_opencode(config)
-    else:
-        await run_claude_code(config)
-
-
-async def run_opencode(config: BackendConfig) -> None:
-    """Run backend in OpenCode mode (subprocess, no tmux)."""
-    from agentgate_backend.heartbeat import write_heartbeat
-    from agentgate_backend.inject_server import start_server_opencode
-    from agentgate_backend.opencode_driver import OpenCodeDriver
-
-    opencode_cmd = config.claude_command if config.claude_command != "claude" else "opencode"
-
-    driver = OpenCodeDriver(
-        work_dir=str(config.work_dir),
-        opencode_cmd=opencode_cmd,
-        model=config.opencode_model,
-    )
-
-    runner = await start_server_opencode(
-        driver=driver,
-        api_token=config.api_token,
-        port=config.http_port,
-    )
-
-    heartbeat_path = (
-        Path.home() / ".agentgate" / "heartbeat" / f"{config.name}.json"
-    )
-
-    logger.info(
-        "Backend '%s' started on port %d (agent_type=opencode, model=%s)",
-        config.name, config.http_port, config.opencode_model or "default",
-    )
-
-    stop = asyncio.Event()
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-
-    async def heartbeat_loop() -> None:
-        while not stop.is_set():
-            write_heartbeat(heartbeat_path)
-            await asyncio.sleep(30)
-
-    heartbeat_task = asyncio.create_task(heartbeat_loop())
-
-    await stop.wait()
-
-    logger.info("Shutting down backend '%s'...", config.name)
-    await driver.stop()
-    heartbeat_task.cancel()
-    await runner.cleanup()
-
-
-async def run_claude_code(config: BackendConfig) -> None:
-    """Run backend in Claude Code mode (tmux, original logic)."""
+    """Unified startup — creates the appropriate driver, then runs generic loop."""
     from agentgate_backend.delivery_tracker import DeliveryTracker
     from agentgate_backend.heartbeat import write_heartbeat
-    from agentgate_backend.inject_server import start_server
+    from agentgate_backend.inject_server import start_server_with_driver
     from agentgate_backend.self_monitor import SelfMonitor, SelfMonitorConfig
-    from agentgate_backend.session import SessionManager
     from agentgate_backend.tmux_manager import TmuxManager
 
-    # 1. Init tmux manager
     tmux = TmuxManager(session_name=config.tmux_session_name)
-
-    # 2. Init components
     tracker = DeliveryTracker()
-    session_mgr = SessionManager()
 
-    # 3. Start inject server (HTTP API)
-    runner = await start_server(
+    # Create driver based on agent_type
+    driver = _create_driver(config, tmux)
+
+    # Start HTTP server (uses AgentDriver for inject + output)
+    runner = await start_server_with_driver(
+        driver=driver,
         tracker=tracker,
-        session_manager=session_mgr,
-        tmux_manager=tmux,
         api_token=config.api_token,
         port=config.http_port,
     )
 
-    # 4. Init self-monitor
+    # Self-monitor (uses AgentDriver for process_name, error_patterns, recovery)
     sm_config = SelfMonitorConfig.from_backend_config()
     monitor = SelfMonitor(
         tmux_manager=tmux,
         config=sm_config,
-        claude_command=config.claude_command,
+        claude_command=driver.get_start_command(str(config.work_dir)),
+        agent_driver=driver,
     )
 
-    # 5. Heartbeat path
-    heartbeat_path = (
-        Path.home() / ".agentgate" / "heartbeat" / f"{config.name}.json"
+    heartbeat_path = Path.home() / ".agentgate" / "heartbeat" / f"{config.name}.json"
+
+    logger.info(
+        "Backend '%s' started on port %d (agent_type=%s)",
+        config.name, config.http_port, config.agent_type,
     )
 
-    logger.info("Backend '%s' started on port %d", config.name, config.http_port)
-
-    # 5b. Auto-create initial Claude Code window if work_dir is configured
-    #     and no working windows exist yet (first boot).
+    # Auto-create initial window if work_dir is configured
     work_dir = config.work_dir
-    if work_dir != Path.home():  # Non-default work_dir means explicitly configured
+    if work_dir != Path.home():
         existing_windows = await tmux.list_windows()
         if not existing_windows:
-            logger.info(
-                "No working windows found — bootstrapping Claude Code in %s",
-                work_dir,
-            )
+            start_cmd = driver.get_start_command(str(work_dir))
+            logger.info("No windows — bootstrapping %s in %s", config.agent_type, work_dir)
             default_window = config.initial_window_name or work_dir.name
             ok, msg, wname, wid = await tmux.create_window(
                 work_dir=str(work_dir),
                 window_name=default_window,
                 start_claude=True,
+                claude_command_override=start_cmd,
             )
             if ok:
                 logger.info("Initial window created: %s (id=%s)", wname, wid)
+                await driver.accept_startup_prompts(wid)
             else:
                 logger.error("Failed to create initial window: %s", msg)
 
-    # 6. Main loop — wait for SIGINT/SIGTERM
+    # Main loop
     stop = asyncio.Event()
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -170,12 +111,61 @@ async def run_claude_code(config: BackendConfig) -> None:
 
     await stop.wait()
 
-    # Graceful shutdown
     logger.info("Shutting down backend '%s'...", config.name)
     monitor.stop()
     monitor_task.cancel()
     heartbeat_task.cancel()
+    if hasattr(driver, "close"):
+        driver.close()
     await runner.cleanup()
+
+
+def _create_driver(config: BackendConfig, tmux):
+    """Create AgentDriver based on config.agent_type + config.agent_mode.
+
+    Matrix:
+      agent_type=claude-code + agent_mode=tmux       → ClaudeCodeDriver (tmux + JSONL)
+      agent_type=claude-code + agent_mode=subprocess  → ClaudeCodeSubprocessDriver (stream-json)
+      agent_type=opencode    + agent_mode=tmux        → OpenCodeTmuxDriver (tmux + SQLite)
+      agent_type=opencode    + agent_mode=subprocess  → OpenCodeSubprocessDriver (run per-turn)
+    """
+    agent_type = config.agent_type
+    agent_mode = config.agent_mode
+
+    if agent_type == "opencode" and agent_mode == "subprocess":
+        from agentgate_backend.opencode_subprocess_driver import OpenCodeSubprocessDriver
+        opencode_cmd = config.claude_command if config.claude_command != "claude" else "opencode"
+        return OpenCodeSubprocessDriver(
+            work_dir=str(config.work_dir),
+            opencode_cmd=opencode_cmd,
+            model=config.opencode_model,
+        )
+
+    if agent_type == "opencode":  # tmux mode
+        from agentgate_backend.opencode_tmux_driver import OpenCodeTmuxDriver
+        opencode_cmd = config.claude_command if config.claude_command != "claude" else "opencode"
+        return OpenCodeTmuxDriver(
+            tmux_manager=tmux,
+            opencode_command=opencode_cmd,
+            model=config.opencode_model,
+            work_dir=str(config.work_dir),
+        )
+
+    if agent_type == "claude-code" and agent_mode == "subprocess":
+        from agentgate_backend.claude_code_subprocess_driver import ClaudeCodeSubprocessDriver
+        return ClaudeCodeSubprocessDriver(
+            claude_command=config.claude_command,
+            work_dir=str(config.work_dir),
+        )
+
+    # Default: claude-code + tmux
+    from agentgate_backend.claude_code_driver import ClaudeCodeDriver
+    from agentgate_backend.session import SessionManager
+    return ClaudeCodeDriver(
+        claude_command=config.claude_command,
+        session_manager=SessionManager(),
+        tmux_manager=tmux,
+    )
 
 
 if __name__ == "__main__":

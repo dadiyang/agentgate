@@ -502,11 +502,11 @@ def create_opencode_app(
 
 async def start_server_opencode(
     *,
-    driver,  # OpenCodeDriver
+    driver,  # OpenCodeDriver (subprocess mode, legacy)
     api_token: str = "",
     port: int = 8901,
 ) -> web.AppRunner:
-    """Start the HTTP server (OpenCode mode). Returns runner for lifecycle management."""
+    """Start the HTTP server (OpenCode subprocess mode). Returns runner."""
     global _startup_time
     _startup_time = time.monotonic()
 
@@ -515,5 +515,140 @@ async def start_server_opencode(
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
-    logger.info("HTTP inject server (opencode) started on 127.0.0.1:%d", port)
+    logger.info("HTTP inject server (opencode-subprocess) started on 127.0.0.1:%d", port)
+    return runner
+
+
+# ------------------------------------------------------------------
+#  Driver-based server — unified for all agent types in tmux mode
+# ------------------------------------------------------------------
+
+
+def create_driver_app(
+    *,
+    driver,  # AgentDriver
+    tracker: DeliveryTracker,
+    api_token: str = "",
+) -> web.Application:
+    """Create aiohttp app using AgentDriver for all agent operations.
+
+    The driver handles inject, output reading, and health — upper layer
+    doesn't know if it's tmux, subprocess, or anything else.
+    """
+    message_store = MessageStore()
+
+    async def health_handler(request: web.Request) -> web.Response:
+        err = _check_auth(request, api_token)
+        if err:
+            return err
+        return web.json_response({
+            "status": "ok",
+            "windows": [],
+            "uptime_seconds": int(time.monotonic() - _startup_time),
+            "watchdog_enabled": True,
+            "window_health": {},
+        })
+
+    async def inject_handler(request: web.Request) -> web.Response:
+        err = _check_auth(request, api_token)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(
+                {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
+                status=400,
+            )
+
+        window_name = body.get("window_name", "")
+        text = body.get("text", "")
+        track = body.get("track_delivery", True)
+        message_id = body.get("message_id", "")
+
+        if not text:
+            return web.json_response(
+                {"ok": False, "error": "bad_request", "msg": "text required"},
+                status=400,
+            )
+
+        if message_id and message_store.has(message_id):
+            return web.json_response({
+                "ok": True, "duplicate": True, "message_id": message_id,
+                "msg": "Duplicate message_id — already injected",
+            })
+
+        # Inject via driver (tmux send_keys, subprocess stdin, or whatever)
+        success, msg = await driver.inject(window_name, text)
+        if not success:
+            return web.json_response(
+                {"ok": False, "error": "inject_failed", "msg": msg},
+                status=500,
+            )
+
+        if message_id:
+            message_store.add(message_id)
+
+        delivery_id = None
+        if track:
+            delivery_id = tracker.register(window_name, text)
+
+        logger.info(
+            "HTTP inject: window=%s delivery=%s message_id=%s len=%d",
+            window_name, delivery_id or "untracked", message_id or "none", len(text),
+        )
+        return web.json_response({
+            "ok": True, "delivery_id": delivery_id,
+            "window_id": window_name,
+            "message_id": message_id or None, "msg": msg,
+        })
+
+    async def output_handler(request: web.Request) -> web.Response:
+        err = _check_auth(request, api_token)
+        if err:
+            return err
+        window_name = request.match_info["window_name"]
+        since = int(request.query.get("since", "0"))
+
+        result = await driver.read_output(window_name, since)
+
+        return web.json_response({
+            "ok": True,
+            "window_name": window_name,
+            "window_id": window_name,
+            "messages": result.messages,
+            "count": result.count,
+            "since": since,
+            "next_offset": result.cursor,
+        })
+
+    app = web.Application()
+    app.router.add_get("/api/health", health_handler)
+    app.router.add_post("/api/inject", inject_handler)
+    app.router.add_get("/api/output/{window_name}", output_handler)
+
+    return app
+
+
+async def start_server_with_driver(
+    *,
+    driver,  # AgentDriver
+    tracker: DeliveryTracker,
+    api_token: str = "",
+    port: int = 8901,
+) -> web.AppRunner:
+    """Start HTTP server with AgentDriver abstraction."""
+    global _startup_time
+    _startup_time = time.monotonic()
+
+    app = create_driver_app(
+        driver=driver,
+        tracker=tracker,
+        api_token=api_token,
+    )
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    logger.info("HTTP inject server (driver) started on 127.0.0.1:%d", port)
     return runner

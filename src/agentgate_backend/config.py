@@ -21,6 +21,7 @@ class BackendConfig(BaseSettings):
     api_token: str = ""
     work_dir: Path = Path.home()
     agent_type: str = "claude-code"  # "claude-code" or "opencode"
+    agent_mode: str = "tmux"  # "tmux" or "subprocess"
     tmux_session_name: str = "agentgate"
     tmux_main_window_name: str = "__main__"
     initial_window_name: str = ""  # Default: work_dir basename

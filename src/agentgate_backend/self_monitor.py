@@ -45,8 +45,10 @@ _DEFAULT_CLAUDE_ERROR_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
-def _get_error_patterns() -> list[tuple[str, str]]:
-    """Return error patterns, from config if available, else defaults."""
+def _get_error_patterns(driver=None) -> list[tuple[str, str]]:
+    """Return error patterns from driver, config, or defaults."""
+    if driver is not None:
+        return driver.error_patterns
     patterns = getattr(_backend_config, "claude_error_patterns", None)
     if patterns:
         return patterns
@@ -153,11 +155,13 @@ class SelfMonitor:
         config: SelfMonitorConfig,
         alert_fn: AlertFn | None = None,
         claude_command: str | None = None,
+        agent_driver=None,
     ) -> None:
         self._tmux = tmux_manager
         self._config = config
         self._alert_fn = alert_fn
         self._claude_command = claude_command or _backend_config.claude_command
+        self._agent_driver = agent_driver  # Optional AgentDriver for process_name/error_patterns/recovery
         self._backoff = RestartBackoff(
             base_delay=_backend_config.restart_base_delay,
             max_delay=_backend_config.restart_max_delay,
@@ -261,7 +265,11 @@ class SelfMonitor:
             logger.error("SelfMonitor: failed to list windows: %s", e, exc_info=True)
             return results
 
-        expected_process = _backend_config.process_name
+        expected_process = (
+            self._agent_driver.process_name
+            if self._agent_driver is not None
+            else _backend_config.process_name
+        )
 
         for w in windows:
             entry: dict[str, Any] = {
@@ -289,7 +297,7 @@ class SelfMonitor:
                     tail = lines[-10:] if len(lines) >= 10 else lines
                     tail_lower = "\n".join(tail).lower()
 
-                    for pattern, label in _get_error_patterns():
+                    for pattern, label in _get_error_patterns(self._agent_driver):
                         if pattern in tail_lower:
                             entry["status"] = "degraded"
                             entry["degraded_reason"] = label
@@ -327,10 +335,16 @@ class SelfMonitor:
             await self._tmux.send_keys(wid, "", enter=True, literal=False)
             await asyncio.sleep(0.5)
             # Build restart command: --resume {session_id} or --continue
-            restart_cmd = self._build_restart_command(wid, window_name)
+            if self._agent_driver is not None:
+                restart_cmd = self._agent_driver.build_recovery_command(wid)
+            else:
+                restart_cmd = self._build_restart_command(wid, window_name)
             await self._tmux.send_keys(wid, restart_cmd, enter=True, literal=True)
             # Accept trust dialog if it appears
-            await self._tmux._accept_trust_dialog(wid)
+            if self._agent_driver is not None:
+                await self._agent_driver.accept_startup_prompts(self._tmux, wid)
+            else:
+                await self._tmux._accept_trust_dialog(wid)
             logger.info("SelfMonitor: sent restart commands to window %s", wid)
             return True
         except Exception as e:
@@ -339,7 +353,11 @@ class SelfMonitor:
 
     async def _verify_restart(self, wid: str, timeout: int = 30) -> bool:
         """Wait up to timeout seconds for claude to actually start in window."""
-        expected_process = _backend_config.process_name
+        expected_process = (
+            self._agent_driver.process_name
+            if self._agent_driver is not None
+            else _backend_config.process_name
+        )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(5)

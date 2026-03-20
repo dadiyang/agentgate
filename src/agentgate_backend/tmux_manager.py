@@ -382,13 +382,16 @@ class TmuxManager:
         work_dir: str,
         window_name: str | None = None,
         start_claude: bool = True,
+        claude_command_override: str | None = None,
     ) -> tuple[bool, str, str, str]:
-        """Create a new tmux window and optionally start Claude Code.
+        """Create a new tmux window and optionally start an agent.
 
         Args:
             work_dir: Working directory for the new window
             window_name: Optional window name (defaults to directory name)
-            start_claude: Whether to start claude command
+            start_claude: Whether to start the agent command
+            claude_command_override: Override the default agent command
+                (e.g. "opencode -m dashscope/qwen-plus" instead of "claude")
 
         Returns:
             Tuple of (success, message, window_name, window_id)
@@ -424,7 +427,8 @@ class TmuxManager:
                 if start_claude:
                     pane = window.active_pane
                     if pane:
-                        pane.send_keys(config.claude_command, enter=True)
+                        cmd = claude_command_override or config.claude_command
+                        pane.send_keys(cmd, enter=True)
 
                 logger.info(
                     "Created window '%s' (id=%s) at %s",
