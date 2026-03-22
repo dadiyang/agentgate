@@ -78,19 +78,23 @@ curl "http://localhost:8903/api/output/main?since=0"
 
 ## Routing
 
-Messages are routed by a `(channel, bot, chat)` triplet. One bot handles multiple projects:
+Messages are routed by a `(channel, bot, chat)` triplet — meaning the **same bot** in **different groups** can talk to **different agents**. This is the key to scaling without bot sprawl:
+
+- **No bot-per-agent overhead.** You don't need to create a new bot for each agent. One bot covers all your projects — just put it in different groups.
+- **Group = context.** Users talk in whichever group matches their project. The routing is invisible — they just send a message and the right agent responds.
+- **Add projects in seconds.** New project? Create a group, add the bot, add one route config line, hot-reload. No bot registration, no token management.
 
 ```yaml
 routes:
   - channel: feishu
     bot_id: cli_Xxxxx
     chat_id: oc_fish_dev_group
-    backend: fish-dev
+    backend: fish-dev            # → fish project dev agent
 
   - channel: feishu
-    bot_id: cli_Xxxxx          # same bot
+    bot_id: cli_Xxxxx            # same bot
     chat_id: oc_trade_dev_group  # different group
-    backend: trade-dev           # different agent
+    backend: trade-dev           # → trade project dev agent
 ```
 
 Update the config and hot-reload without restarting:

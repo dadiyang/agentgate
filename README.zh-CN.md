@@ -78,19 +78,23 @@ curl "http://localhost:8903/api/output/main?since=0"
 
 ## 路由
 
-消息按 `(通道, Bot, 群组)` 三元组路由。一个 Bot 处理多个项目：
+消息按 `(通道, Bot, 群组)` 三元组路由——**同一个 Bot** 在**不同群**里可以对接**不同的 Agent**。这是在不增加 bot 数量的情况下扩展项目的关键：
+
+- **不用一个 Agent 一个 Bot。** 不需要为每个 Agent 单独创建 bot。一个 bot 覆盖所有项目——放到不同群里就行。
+- **群 = 上下文。** 用户在对应项目的群里发消息，路由对用户透明——发了消息就有对应的 Agent 回应。
+- **新项目秒级接入。** 建个群、把 bot 拉进去、加一行路由配置、热加载。不用注册新 bot，不用管理新 token。
 
 ```yaml
 routes:
   - channel: feishu
     bot_id: cli_Xxxxx
     chat_id: oc_fish_dev_group
-    backend: fish-dev
+    backend: fish-dev            # → fish 项目的 dev agent
 
   - channel: feishu
-    bot_id: cli_Xxxxx          # 同一个 Bot
+    bot_id: cli_Xxxxx            # 同一个 Bot
     chat_id: oc_trade_dev_group  # 不同的群
-    backend: trade-dev           # 不同的 Agent
+    backend: trade-dev           # → trade 项目的 dev agent
 ```
 
 改完配置热加载，不需要重启：
