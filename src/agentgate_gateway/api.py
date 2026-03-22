@@ -23,7 +23,7 @@ def _check_gateway_auth(request: web.Request, api_token: str) -> web.Response | 
 
 
 class GatewayAPI:
-    def __init__(self, config, db, router, adapters, backends, inbound_handler, output_poller):
+    def __init__(self, config, db, router, adapters, backends, inbound_handler, output_poller, config_path=None):
         """
         config:          GatewayConfig
         db:              MessageDB
@@ -32,6 +32,7 @@ class GatewayAPI:
         backends:        dict[str, BackendState]
         inbound_handler: InboundHandler
         output_poller:   OutputPoller
+        config_path:     Path | None — config file path for hot-reload
         """
         self.config = config
         self._db = db
@@ -40,6 +41,7 @@ class GatewayAPI:
         self._backends = backends
         self._inbound = inbound_handler
         self._poller = output_poller
+        self._config_path = config_path
         self._start_time = time.time()
 
     # ------------------------------------------------------------------ #
@@ -160,12 +162,12 @@ class GatewayAPI:
             }
 
         try:
-            pending_inbound = len(await self._db.get_pending_inbound())
+            pending_inbound = len(await self._db.get_pending("inbound"))
         except Exception:
             pending_inbound = 0
 
         try:
-            pending_outbound = len(await self._db.get_pending_outbound())
+            pending_outbound = len(await self._db.get_pending("outbound"))
         except Exception:
             pending_outbound = 0
 
@@ -210,6 +212,64 @@ class GatewayAPI:
             },
             200,
         )
+
+    # ------------------------------------------------------------------ #
+    #  Config reload                                                       #
+    # ------------------------------------------------------------------ #
+
+    def reload_config(self) -> dict:
+        """Reload config.yaml — updates routes and backends. Returns result dict.
+
+        Shared by SIGHUP handler and POST /api/admin/reload.
+        """
+        from agentgate_gateway.config import GatewayConfig
+        from agentgate_gateway.health_prober import BackendState
+
+        if self._config_path is None:
+            return {"ok": False, "error": "no_config_path", "msg": "No config file path — cannot reload"}
+
+        new_config = GatewayConfig.from_yaml(self._config_path)
+
+        # Reload routes
+        old_count = len(self._router._forward)
+        new_count = self._router.reload(new_config.routes)
+        logger.info("Config reload: routes (%d → %d)", old_count, new_count)
+
+        # Reload backends (add new, update existing, keep runtime state)
+        added, updated = 0, 0
+        for bid, bc in new_config.backends.items():
+            if bid in self._backends:
+                bs = self._backends[bid]
+                bs.url = bc.url
+                bs.api_token = bc.api_token
+                bs.default_window = bc.default_window
+                updated += 1
+            else:
+                self._backends[bid] = BackendState(
+                    url=bc.url, api_token=bc.api_token, default_window=bc.default_window,
+                )
+                added += 1
+        logger.info("Config reload: backends updated=%d added=%d", updated, added)
+
+        return {
+            "ok": True,
+            "routes": new_count,
+            "backends_updated": updated,
+            "backends_added": added,
+        }
+
+    async def handle_reload(self, request: web.Request) -> web.Response:
+        """POST /api/admin/reload — Hot-reload config (routes + backends)."""
+        auth_err = _check_gateway_auth(request, self.config.api_token)
+        if auth_err:
+            return auth_err
+        try:
+            result = self.reload_config()
+            status = 200 if result["ok"] else 400
+            return _json(result, status)
+        except Exception as e:
+            logger.error("Config reload failed: %s", e, exc_info=True)
+            return _json({"ok": False, "error": "reload_failed", "msg": str(e)}, 500)
 
     # ------------------------------------------------------------------ #
     #  Admin endpoints (only registered when test_mode=True)              #
@@ -309,6 +369,7 @@ def setup_routes(app: web.Application, gateway: GatewayAPI) -> None:
     app.router.add_get("/api/channel/output/{backend_id}", gateway.handle_http_output)
     app.router.add_get("/api/health", gateway.handle_health)
     app.router.add_post("/api/messages/query", gateway.handle_messages_query)
+    app.router.add_post("/api/admin/reload", gateway.handle_reload)
 
     if gateway.config.test_mode:
         app.router.add_post("/api/admin/adapter/{name}/disconnect", gateway.handle_admin_disconnect)

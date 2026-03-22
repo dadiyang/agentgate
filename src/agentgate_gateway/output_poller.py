@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 PUSH_MAX_RETRY = 5
 
+# Context compression summary prefix — replace with short notice for IM push
+_CONTEXT_SUMMARY_PREFIX = "This session is being continued from a previous conversation"
+_CONTEXT_SUMMARY_NOTICE = "[上下文已压缩，对话继续]"
+
 
 def _group_by_role(messages: list[dict]) -> list[tuple[str, list[str]]]:
     """Group consecutive messages by role.
@@ -220,6 +224,7 @@ class OutputPoller:
         groups = _group_by_role(text_messages)
 
         # Reverse route: find all bound channels for this backend
+        # Push runs as background tasks so retries don't block polling of other backends.
         bindings = self._router.reverse_lookup(backend_id)
         for role, texts in groups:
             if role == "user":
@@ -227,7 +232,9 @@ class OutputPoller:
             else:
                 combined = "\n\n".join(texts)
             for channel_type, bot_id, chat_id in bindings:
-                await self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined)
+                asyncio.create_task(
+                    self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined)
+                )
 
     async def _confirm_processed(self, backend_id: str, url: str, token: str):
         """Confirm all pending inbound messages for this backend as processed.
@@ -261,11 +268,10 @@ class OutputPoller:
             if resp.status_code != 200:
                 logger.warning("confirm_processed failed for %s: %d", backend_id, resp.status_code)
 
-            # Update gateway DB: mark these messages as processed
-            now = datetime.now(timezone.utc).isoformat()
+            # Update gateway DB: mark these messages as delivered
             for mid in message_ids:
                 try:
-                    await self._db.update_inbound_process(mid, "processed", processed_at=now)
+                    await self._db.update_status(mid, "delivered")
                 except Exception as e:
                     logger.error("Failed to update process_status for %s: %s", mid, e, exc_info=True)
 
@@ -293,7 +299,7 @@ class OutputPoller:
             now = datetime.now(timezone.utc).isoformat()
 
             # E-7: Dedup check — skip if same content already pushed for this backend
-            if await self._db.has_outbound_content_hash(backend_id, content_hash):
+            if await self._db.has_content_hash(backend_id, content_hash):
                 logger.debug("Outbound dedup: content_hash=%s already exists, skipping", content_hash[:16])
                 continue
 
@@ -317,12 +323,20 @@ class OutputPoller:
             adapter = self._adapters.get(f"{channel_type}:{bot_id}") or self._adapters.get(channel_type)
             if not adapter:
                 logger.warning("No adapter for channel %s", channel_type)
-                await self._db.update_outbound_push(
+                await self._db.update_status(
                     msg_id, "failed", error_message=f"No adapter for channel {channel_type}"
                 )
                 continue
 
-            await self._push_with_retry(adapter, msg_id, chat_id, part)
+            # Replace context compression summary with short notice for IM
+            push_text = part
+            # Strip emoji prefix (👤) for matching, check raw text too
+            stripped = part.lstrip("\U0001f464 ")
+            if stripped.startswith(_CONTEXT_SUMMARY_PREFIX):
+                push_text = _CONTEXT_SUMMARY_NOTICE
+                logger.info("Context summary replaced for IM push (msg_id=%s, original_len=%d)", msg_id, len(part))
+
+            await self._push_with_retry(adapter, msg_id, chat_id, push_text)
 
     async def _push_with_retry(self, adapter, msg_id: str, chat_id: str, text: str):
         """Push a single message shard with exponential backoff retry."""
@@ -330,8 +344,7 @@ class OutputPoller:
             try:
                 success = await adapter.send_message(chat_id, text)
                 if success:
-                    pushed_at = datetime.now(timezone.utc).isoformat()
-                    await self._db.update_outbound_push(msg_id, "pushed", pushed_at=pushed_at)
+                    await self._db.update_status(msg_id, "delivered")
                     return
                 logger.warning(
                     "Push attempt %d/%d failed: send_message returned False (msg_id=%s)",
@@ -344,13 +357,13 @@ class OutputPoller:
                 )
 
             # Update retry_count in DB (E-5)
-            await self._db.increment_outbound_retry(msg_id)
+            await self._db.increment_retry(msg_id)
 
             if attempt < PUSH_MAX_RETRY - 1:
                 await asyncio.sleep(PUSH_RETRY_DELAYS[attempt])
 
         # All retries exhausted
-        await self._db.update_outbound_push(
+        await self._db.update_status(
             msg_id, "failed", error_message=f"{PUSH_MAX_RETRY} push retries exhausted"
         )
         # E-3: Alert on push failure
@@ -374,10 +387,9 @@ class OutputPoller:
             return
         success = await adapter.send_message(msg["chat_id"], msg["content"])
         if success:
-            pushed_at = datetime.now(timezone.utc).isoformat()
-            await self._db.update_outbound_push(msg["id"], "pushed", pushed_at=pushed_at)
+            await self._db.update_status(msg["id"], "delivered")
         else:
-            await self._db.increment_outbound_retry(msg["id"])
+            await self._db.increment_retry(msg["id"])
 
     async def reset_offset(self, backend_id: str):
         """Reset the polling offset for a backend (e.g. after restart)."""

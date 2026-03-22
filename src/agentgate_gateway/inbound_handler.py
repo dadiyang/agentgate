@@ -126,7 +126,7 @@ class InboundHandler:
         backend = self._backends.get(backend_id)
         if not backend:
             logger.error("Backend %s not configured", backend_id)
-            await self._db.update_inbound_delivery(
+            await self._db.update_status(
                 msg_id, "failed", error_message=f"Backend {backend_id} not configured"
             )
             return
@@ -168,10 +168,7 @@ class InboundHandler:
                             "Inject ok: backend=%s msg_id=%s delivery_id=%s elapsed=%.0fms",
                             backend_id, msg_id, data.get("delivery_id"), elapsed_ms,
                         )
-                        now = datetime.now(timezone.utc).isoformat()
-                        await self._db.update_inbound_delivery(
-                            msg_id, "delivered", delivered_at=now
-                        )
+                        await self._db.update_status(msg_id, "delivered")
                         return
                 logger.warning(
                     "Inject attempt %d/%d failed: status=%d body=%s",
@@ -191,13 +188,13 @@ class InboundHandler:
                 )
 
             # E-5: Update retry_count in DB
-            await self._db.increment_inbound_retry(msg_id)
+            await self._db.increment_retry(msg_id)
 
             if attempt < MAX_RETRY - 1:
                 await asyncio.sleep(RETRY_DELAYS[attempt])
 
         # All retries exhausted
-        await self._db.update_inbound_delivery(
+        await self._db.update_status(
             msg_id, "failed", error_message="3 retries exhausted"
         )
         # E-3: Alert on delivery failure

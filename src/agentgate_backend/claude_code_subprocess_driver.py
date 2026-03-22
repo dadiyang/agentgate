@@ -51,6 +51,10 @@ class ClaudeCodeSubprocessDriver:
         self._reader_task: asyncio.Task | None = None
         self._last_error: str | None = None
 
+        # Persist session_id to survive backend restarts
+        self._session_file = config.instance_dir / "cc_subprocess_session_id"
+        self._load_session_id()
+
     # --- AgentDriver protocol ---
 
     def get_start_command(self, work_dir: str) -> str:
@@ -110,18 +114,44 @@ class ClaudeCodeSubprocessDriver:
         if self._reader_task:
             self._reader_task.cancel()
 
+    # --- Session persistence ---
+
+    def _load_session_id(self):
+        """Load session_id from disk (survives backend restart)."""
+        try:
+            if self._session_file.exists():
+                sid = self._session_file.read_text().strip()
+                if sid:
+                    self._session_id = sid
+                    logger.info("CC subprocess: loaded session_id=%s from disk", sid)
+        except Exception as e:
+            logger.error("CC subprocess: failed to load session_id: %s", e)
+
+    def _save_session_id(self, session_id: str):
+        """Persist session_id to disk."""
+        try:
+            self._session_file.write_text(session_id)
+            logger.info("CC subprocess: saved session_id=%s to disk", session_id)
+        except Exception as e:
+            logger.error("CC subprocess: failed to save session_id: %s", e)
+
     # --- Internal ---
 
     async def _start_process(self):
-        """Start the CC stream-json subprocess."""
+        """Start the CC stream-json subprocess.
+
+        If a previous session_id exists, uses --resume to restore context.
+        """
         args = [
             self._command, "-p",
             "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--verbose",
             "--permission-mode", self._permission_mode,
-            "--no-session-persistence",
         ]
+        if self._session_id:
+            args.extend(["--resume", self._session_id])
+            logger.info("CC subprocess: resuming session %s", self._session_id)
         if self._model:
             args.extend(["--model", self._model])
 
@@ -164,7 +194,10 @@ class ClaudeCodeSubprocessDriver:
                     self._append_output("assistant", f"🔧 {name}", "tool_use")
 
         elif etype == "result":
-            self._session_id = event.get("session_id", self._session_id)
+            new_sid = event.get("session_id", "")
+            if new_sid and new_sid != self._session_id:
+                self._session_id = new_sid
+                self._save_session_id(new_sid)
             self._busy = False
             # Process queued message
             if not self._queue.empty():

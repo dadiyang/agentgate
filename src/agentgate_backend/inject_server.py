@@ -149,6 +149,23 @@ def create_app(
                 status=404,
             )
 
+        # Reject inject if agent is dead or degraded (e.g. OAuth login prompt).
+        # Messages sent to a non-functional pane are silently lost.
+        # Return 503 so gateway retries later.
+        if self_monitor is not None:
+            ws = self_monitor.window_statuses.get(window.window_id)
+            if ws and ws.get("status") in ("dead", "degraded"):
+                reason = ws.get("degraded_reason") or ws.get("detail") or "agent unavailable"
+                logger.warning(
+                    "Inject rejected: window %s status=%s reason=%s",
+                    window_name, ws["status"], reason,
+                )
+                return web.json_response(
+                    {"ok": False, "error": "agent_unavailable",
+                     "msg": f"Agent not ready: {reason}"},
+                    status=503,
+                )
+
         # Inject via session_manager
         success, msg = await session_manager.send_to_window(window.window_id, text)
         if not success:
@@ -529,6 +546,7 @@ def create_driver_app(
     driver,  # AgentDriver
     tracker: DeliveryTracker,
     api_token: str = "",
+    tmux_manager: TmuxManager | None = None,
 ) -> web.Application:
     """Create aiohttp app using AgentDriver for all agent operations.
 
@@ -541,9 +559,23 @@ def create_driver_app(
         err = _check_auth(request, api_token)
         if err:
             return err
+
+        window_list = []
+        if tmux_manager is not None:
+            try:
+                windows = await tmux_manager.list_windows()
+                for w in windows:
+                    window_list.append({
+                        "window_id": w.window_id,
+                        "window_name": w.window_name,
+                        "pane_command": w.pane_current_command,
+                    })
+            except Exception as e:
+                logger.error("health: list_windows failed: %s", e, exc_info=True)
+
         return web.json_response({
             "status": "ok",
-            "windows": [],
+            "windows": window_list,
             "uptime_seconds": int(time.monotonic() - _startup_time),
             "watchdog_enabled": True,
             "window_health": {},
@@ -636,6 +668,7 @@ async def start_server_with_driver(
     tracker: DeliveryTracker,
     api_token: str = "",
     port: int = 8901,
+    tmux_manager: TmuxManager | None = None,
 ) -> web.AppRunner:
     """Start HTTP server with AgentDriver abstraction."""
     global _startup_time
@@ -645,6 +678,7 @@ async def start_server_with_driver(
         driver=driver,
         tracker=tracker,
         api_token=api_token,
+        tmux_manager=tmux_manager,
     )
     runner = web.AppRunner(app)
     await runner.setup()

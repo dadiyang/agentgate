@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=irons
-ExecStart=/home/irons/.local/bin/agentgate-gateway --config /home/irons/.agentgate/gateway/config.yaml
+User=%u
+ExecStart=agentgate-gateway --config %h/.agentgate/gateway/config.yaml
 Restart=always
 RestartSec=3
 # NOTE: No HTTPS_PROXY here. Telegram proxy is configured per-bot in config.yaml.

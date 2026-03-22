@@ -38,6 +38,8 @@ _DEFAULT_CLAUDE_ERROR_PATTERNS: list[tuple[str, str]] = [
     ("overloaded", "API overloaded"),
     ("run /login", "Auth expired"),
     ("not logged in", "Auth expired"),
+    ("paste code here", "OAuth login prompt"),
+    ("oauth/authorize", "OAuth login prompt"),
     ("econnrefused", "Connection refused"),
     ("etimedout", "Connection timed out"),
     ("api error", "API error"),
@@ -56,21 +58,25 @@ def _get_error_patterns(driver=None) -> list[tuple[str, str]]:
 
 
 class RestartBackoff:
-    """Exponential backoff + circuit breaker for restart operations.
+    """Exponential backoff for restart operations.
 
     Schedule: 0 -> base -> base*2 -> base*4 -> ... -> max_delay (cap).
-    Circuit opens after max_failures consecutive failures.
+    Never fully stops — after max_failures, switches to slow retry at
+    slow_interval (default 10 min). This handles cases like OAuth login
+    expiry where recovery may take hours but is eventually self-resolving.
     """
 
     def __init__(
         self,
         base_delay: float = 60,
-        max_delay: float = 3600,
+        max_delay: float = 600,
         max_failures: int = 5,
+        slow_interval: float = 600,  # 10 min slow retry after exhausting fast retries
     ) -> None:
         self.base_delay = base_delay
         self.max_delay = max_delay
         self.max_failures = max_failures
+        self.slow_interval = slow_interval
         self._state: dict[str, dict[str, Any]] = {}
 
     def may_restart(self, key: str) -> bool:
@@ -78,12 +84,10 @@ class RestartBackoff:
         s = self._state.get(key)
         if not s:
             return True
-        if s["count"] >= self.max_failures:
-            return False
         return time.monotonic() >= s["next_allowed"]
 
     def is_circuit_open(self, key: str) -> bool:
-        """Return True if too many failures — no more auto-restarts."""
+        """Return True if past max_failures — in slow-retry mode, not dead-stop."""
         s = self._state.get(key)
         return s is not None and s["count"] >= self.max_failures
 
@@ -91,7 +95,12 @@ class RestartBackoff:
         """Record a restart failure, increasing backoff delay."""
         s = self._state.get(key, {"count": 0, "next_allowed": 0.0})
         s["count"] += 1
-        delay = min(self.base_delay * (2 ** (s["count"] - 1)), self.max_delay)
+        if s["count"] <= self.max_failures:
+            # Fast phase: exponential backoff
+            delay = min(self.base_delay * (2 ** (s["count"] - 1)), self.max_delay)
+        else:
+            # Slow phase: fixed interval, never give up
+            delay = self.slow_interval
         s["next_allowed"] = time.monotonic() + delay
         self._state[key] = s
 
@@ -408,6 +417,49 @@ class SelfMonitor:
             logger.error("SelfMonitor: failed to kill claude in %s: %s", wid, e, exc_info=True)
             return False
 
+    async def _is_session_not_found(self, wid: str) -> bool:
+        """Check if the pane shows 'No conversation found' — CC exited because session_id is stale."""
+        try:
+            pane_text = await self._tmux.capture_pane(wid)
+            if pane_text and "no conversation found" in pane_text.lower():
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _clear_session_id(self, wid: str, window_name: str) -> None:
+        """Remove stale session_id from session_map.json so next restart falls back to --continue."""
+        session_map_file = _backend_config.session_map_file
+        if not session_map_file.exists():
+            return
+        try:
+            data = json.loads(session_map_file.read_text())
+            prefix = f"{_backend_config.tmux_session_name}:"
+            old_sid = "?"
+            cleared = False
+            # Clear by window_id key
+            key_by_id = f"{prefix}{wid}"
+            if key_by_id in data:
+                old_sid = data[key_by_id].get("session_id", "?")
+                del data[key_by_id]
+                cleared = True
+            # Clear by window_name match
+            for key in list(data.keys()):
+                if key.startswith(prefix) and isinstance(data[key], dict):
+                    if data[key].get("window_name") == window_name:
+                        old_sid = data[key].get("session_id", "?")
+                        del data[key]
+                        cleared = True
+            if cleared:
+                session_map_file.write_text(json.dumps(data, indent=2))
+                logger.warning(
+                    "SelfMonitor: cleared stale session_id (was %s) for window %s (%s) — "
+                    "next restart will use --continue",
+                    old_sid, wid, window_name,
+                )
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("SelfMonitor: failed to clear session_id: %s", e)
+
     async def _handle_dead(self, wid: str, info: dict[str, Any]) -> None:
         """Handle a dead claude process based on config.on_claude_dead."""
         action = self._config.on_claude_dead
@@ -425,20 +477,8 @@ class SelfMonitor:
             return
 
         # action is "restart" or "kill_and_restart"
-        if self._backoff.is_circuit_open(backoff_key):
-            await self._send_alert(
-                "claude_process_dead", "CRITICAL",
-                f"Claude 进程已死亡 — 自动重启熔断，需人工介入: {info.get('window_name', wid)}",
-                info.get("detail", ""),
-            )
-            return
-
         if not self._backoff.may_restart(backoff_key):
-            await self._send_alert(
-                "claude_process_dead", "CRITICAL",
-                f"Claude 进程已死亡 — 等待退避冷却: {info.get('window_name', wid)}",
-                info.get("detail", ""),
-            )
+            # Still cooling down — skip this cycle silently
             return
 
         if action == "kill_and_restart":
@@ -454,7 +494,16 @@ class SelfMonitor:
                 note = "已自动重启并验证成功"
             else:
                 self._backoff.record_failure(backoff_key)
-                note = "已发送重启命令但验证未通过"
+                # Check if CC exited because session_id doesn't exist.
+                # "No conversation found with session ID: xxx" means the session
+                # file was deleted — safe to clear and retry with --continue.
+                # Other failures (OAuth, network, etc) keep CC alive and are
+                # handled via the degraded path, NOT here.
+                if await self._is_session_not_found(wid):
+                    self._clear_session_id(wid, window_name)
+                    note = "session 不存在，已清除 session_id，下次将用 --continue 启动"
+                else:
+                    note = "已发送重启命令但验证未通过"
         else:
             self._backoff.record_failure(backoff_key)
             note = "自动重启失败，请手动处理"
@@ -488,20 +537,8 @@ class SelfMonitor:
             )
             return
 
-        if self._backoff.is_circuit_open(backoff_key):
-            await self._send_alert(
-                "claude_degraded", "CRITICAL",
-                f"Claude API 异常: {reason} — 自动重启熔断: {info.get('window_name', wid)}",
-                f"连续 {count} 次检测到异常\n\nPane 末尾:\n{snippet}",
-            )
-            return
-
         if not self._backoff.may_restart(backoff_key):
-            await self._send_alert(
-                "claude_degraded", "CRITICAL",
-                f"Claude API 异常: {reason} — 等待退避冷却: {info.get('window_name', wid)}",
-                f"连续 {count} 次检测到异常\n\nPane 末尾:\n{snippet}",
-            )
+            # Still cooling down — skip this cycle silently
             return
 
         # Execute action: kill (if needed) then restart, then verify

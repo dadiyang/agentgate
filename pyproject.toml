@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentgate"
+name = "im-agent-gate"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,7 +11,7 @@ dependencies = [
     "aiohttp>=3.9",
     "aiofiles>=23.0",
     "libtmux>=0.31",
-    "haloant_kit",
+    "haloant-kit",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",

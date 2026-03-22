@@ -57,6 +57,7 @@ async def run(config: BackendConfig) -> None:
         tracker=tracker,
         api_token=config.api_token,
         port=config.http_port,
+        tmux_manager=tmux if config.agent_mode == "tmux" else None,
     )
 
     # Self-monitor (uses AgentDriver for process_name, error_patterns, recovery)

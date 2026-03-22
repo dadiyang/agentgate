@@ -173,7 +173,7 @@ async def run(config: GatewayConfig, config_path: Path | None = None) -> None:
     await recovery.recover_on_startup()
 
     # 13. HTTP API
-    gateway_api = GatewayAPI(config, db, router, adapters, backend_states, inbound, poller)
+    gateway_api = GatewayAPI(config, db, router, adapters, backend_states, inbound, poller, config_path=config_path)
     app = web.Application()
     setup_routes(app, gateway_api)
     runner = web.AppRunner(app)
@@ -244,34 +244,14 @@ async def run(config: GatewayConfig, config_path: Path | None = None) -> None:
 
     # 15. SIGHUP handler for config hot-reload (routes + backends)
     def handle_sighup():
-        """Reload config.yaml on SIGHUP — updates routes and backends without restart."""
-        if config_path is None:
-            logger.warning("SIGHUP received but no config_path — cannot reload")
-            return
+        """Reload config.yaml on SIGHUP — delegates to GatewayAPI.reload_config()."""
         try:
-            new_config = GatewayConfig.from_yaml(config_path)
-
-            # Reload routes
-            old_count = len(router._forward)
-            new_count = router.reload(new_config.routes)
-            logger.info("SIGHUP: routes reloaded (%d → %d)", old_count, new_count)
-
-            # Reload backends (add new, update existing, keep runtime state)
-            added, updated = 0, 0
-            for bid, bc in new_config.backends.items():
-                if bid in backend_states:
-                    bs = backend_states[bid]
-                    bs.url = bc.url
-                    bs.api_token = bc.api_token
-                    bs.default_window = bc.default_window
-                    updated += 1
-                else:
-                    backend_states[bid] = BackendState(
-                        url=bc.url, api_token=bc.api_token, default_window=bc.default_window,
-                    )
-                    added += 1
-            logger.info("SIGHUP: backends updated=%d added=%d", updated, added)
-
+            result = gateway_api.reload_config()
+            if result["ok"]:
+                logger.info("SIGHUP: reload ok — routes=%d, backends updated=%d added=%d",
+                            result["routes"], result["backends_updated"], result["backends_added"])
+            else:
+                logger.warning("SIGHUP: reload rejected: %s", result.get("msg"))
         except Exception as e:
             logger.error("SIGHUP: reload failed: %s", e, exc_info=True)
 

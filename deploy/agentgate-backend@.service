@@ -4,11 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=irons
-ExecStart=/home/irons/.local/bin/agentgate-backend --name %i
+User=%u
+ExecStart=agentgate-backend --name %i
 Restart=always
 RestartSec=3
-EnvironmentFile=/home/irons/.agentgate/backends/%i/.env
+EnvironmentFile=%h/.agentgate/backends/%i/.env
 
 [Install]
 WantedBy=multi-user.target

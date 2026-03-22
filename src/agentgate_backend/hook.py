@@ -10,7 +10,7 @@ Usage (set in Claude Code config):
 The hook receives a JSON event as argv[1]:
     {
         "session_id": "abc123",
-        "cwd": "/home/user/myproject",
+        "cwd": "/path/to/project",
         ...
     }
 

@@ -1,4 +1,18 @@
 __pycache__/
 *.pyc
 .venv/
+venv/
 *.egg-info/
+.eggs/
+dist/
+build/
+
+# Sensitive files
+.env
+*.key
+*.pem
+
+# Internal development files (not for open source)
+.claude/
+CLAUDE.md
+docs/

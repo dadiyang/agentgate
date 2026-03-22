@@ -125,6 +125,11 @@ class OpenCodeTmuxDriver:
                 msg_meta = json.loads(msg_data_str)
             except (json.JSONDecodeError, TypeError):
                 continue
+            # Only emit assistant messages. User messages from SQLite include
+            # startup/recovery commands (e.g. "opencode -m ... --session ...")
+            # that pollute IM output as noise.
+            if msg_meta.get("role") == "user":
+                continue
             converted = _convert_part(part, msg_meta.get("role", "assistant"))
             if converted:
                 messages.append(converted)
