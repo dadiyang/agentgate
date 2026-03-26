@@ -68,6 +68,7 @@ class OutputPoller:
         self._offsets: dict[str, int] = {}  # backend_id -> byte offset
         self._http = httpx.AsyncClient(timeout=30)
         self._running = True
+        self._push_tasks: set[asyncio.Task] = set()
 
     async def close(self):
         await self._http.aclose()
@@ -147,8 +148,9 @@ class OutputPoller:
             logger.warning("Seed %s: unexpected HTTP %d", backend_id, resp.status_code)
         except Exception as e:
             logger.error("Failed to seed offset for %s: %s", backend_id, e, exc_info=True)
-        # Fallback: set to 0 so we don't retry seeding every cycle.
-        await self._set_offset(backend_id, 0)
+        # Do NOT fall back to offset 0 — that would replay history.
+        # Leave backend_id absent from self._offsets so seeding is retried next cycle.
+        logger.warning("Seed %s failed, will retry next cycle", backend_id)
 
     async def _poll_backend(self, backend_id: str, backend):
         url = getattr(backend, "url", None) or (
@@ -232,9 +234,11 @@ class OutputPoller:
             else:
                 combined = "\n\n".join(texts)
             for channel_type, bot_id, chat_id in bindings:
-                asyncio.create_task(
+                task = asyncio.create_task(
                     self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined)
                 )
+                self._push_tasks.add(task)
+                task.add_done_callback(self._push_tasks.discard)
 
     async def _confirm_processed(self, backend_id: str, url: str, token: str):
         """Confirm all pending inbound messages for this backend as processed.
@@ -293,7 +297,7 @@ class OutputPoller:
             # NOTE: offset deliberately excluded — including it caused dedup
             # bypass after gateway restart (P0 Bug #11).
             content_hash = hashlib.sha256(
-                f"{backend_id}:{i}:{part}".encode()
+                f"{backend_id}:{channel_type}:{bot_id}:{chat_id}:{i}:{part}".encode()
             ).hexdigest()
             msg_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
@@ -331,7 +335,9 @@ class OutputPoller:
             # Replace context compression summary with short notice for IM
             push_text = part
             # Strip emoji prefix (👤) for matching, check raw text too
-            stripped = part.lstrip("\U0001f464 ")
+            stripped = part
+            if part.startswith("\U0001f464 "):
+                stripped = part[len("\U0001f464 "):]
             if stripped.startswith(_CONTEXT_SUMMARY_PREFIX):
                 push_text = _CONTEXT_SUMMARY_NOTICE
                 logger.info("Context summary replaced for IM push (msg_id=%s, original_len=%d)", msg_id, len(part))

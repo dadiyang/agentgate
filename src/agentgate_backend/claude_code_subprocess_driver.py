@@ -25,6 +25,8 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
+_MAX_OUTPUT_ENTRIES = 2000
+
 
 class ClaudeCodeSubprocessDriver:
     """AgentDriver for Claude Code via subprocess stream-json mode."""
@@ -50,6 +52,7 @@ class ClaudeCodeSubprocessDriver:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._reader_task: asyncio.Task | None = None
         self._last_error: str | None = None
+        self._start_lock = asyncio.Lock()
 
         # Persist session_id to survive backend restarts
         self._session_file = config.instance_dir / "cc_subprocess_session_id"
@@ -82,8 +85,21 @@ class ClaudeCodeSubprocessDriver:
             "message": {"role": "user", "content": text},
         })
         assert self._proc is not None and self._proc.stdin is not None
-        self._proc.stdin.write((msg + "\n").encode())
-        await self._proc.stdin.drain()
+        try:
+            self._proc.stdin.write((msg + "\n").encode())
+            await self._proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.error("CC subprocess: stdin write failed (%s), restarting process", e)
+            self._busy = False
+            if not hasattr(self, '_inject_retry'):
+                self._inject_retry = True
+                await self._start_process()
+                try:
+                    return await self.inject(window_name, text)
+                finally:
+                    del self._inject_retry
+            else:
+                return False, "Process restart failed"
         return True, "Injected"
 
     async def read_output(self, window_name: str, since: int) -> OutputResult:
@@ -142,29 +158,30 @@ class ClaudeCodeSubprocessDriver:
 
         If a previous session_id exists, uses --resume to restore context.
         """
-        args = [
-            self._command, "-p",
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--permission-mode", self._permission_mode,
-        ]
-        if self._session_id:
-            args.extend(["--resume", self._session_id])
-            logger.info("CC subprocess: resuming session %s", self._session_id)
-        if self._model:
-            args.extend(["--model", self._model])
+        async with self._start_lock:
+            args = [
+                self._command, "-p",
+                "--input-format", "stream-json",
+                "--output-format", "stream-json",
+                "--verbose",
+                "--permission-mode", self._permission_mode,
+            ]
+            if self._session_id:
+                args.extend(["--resume", self._session_id])
+                logger.info("CC subprocess: resuming session %s", self._session_id)
+            if self._model:
+                args.extend(["--model", self._model])
 
-        logger.info("CC subprocess: starting %s", " ".join(args[:8]))
-        self._proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self._work_dir or None,
-            env={**os.environ},
-        )
-        self._reader_task = asyncio.create_task(self._read_loop())
+            logger.info("CC subprocess: starting %s", " ".join(args[:8]))
+            self._proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=self._work_dir or None,
+                env={**os.environ},
+            )
+            self._reader_task = asyncio.create_task(self._read_loop())
 
     async def _read_loop(self):
         """Read stdout events from CC process."""
@@ -181,6 +198,18 @@ class ClaudeCodeSubprocessDriver:
                 self._handle_event(event)
         except Exception as e:
             logger.error("CC subprocess read error: %s", e, exc_info=True)
+        finally:
+            # Process exited (normal or crash) — ensure busy is cleared
+            self._busy = False
+            # Drain queued messages by restarting process for next one
+            if not self._queue.empty():
+                text = self._queue.get_nowait()
+                task = asyncio.create_task(self.inject("", text))
+                task.add_done_callback(
+                    lambda t: t.exception() and logger.error(
+                        "CC subprocess: queue drain task failed: %s", t.exception()
+                    )
+                )
 
     def _handle_event(self, event: dict):
         etype = event.get("type", "")
@@ -202,10 +231,19 @@ class ClaudeCodeSubprocessDriver:
             # Process queued message
             if not self._queue.empty():
                 text = self._queue.get_nowait()
-                asyncio.create_task(self.inject("", text))
+                task = asyncio.create_task(self.inject("", text))
+                task.add_done_callback(
+                    lambda t: t.exception() and logger.error(
+                        "CC subprocess: queue drain task failed: %s", t.exception()
+                    )
+                )
 
     def _append_output(self, role: str, text: str, content_type: str = "text"):
         msg = {"role": role, "text": text, "content_type": content_type,
                "_size": len(text.encode()) + 50}
         self._output.append(msg)
         self._output_bytes += msg["_size"]
+        # Trim oldest half when buffer exceeds max size (_output_bytes stays monotonic)
+        if len(self._output) > _MAX_OUTPUT_ENTRIES:
+            trim_count = _MAX_OUTPUT_ENTRIES // 2
+            self._output = self._output[trim_count:]

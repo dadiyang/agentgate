@@ -313,7 +313,7 @@ class SelfMonitor:
                             entry["pane_snippet"] = "\n".join(tail[-5:])
                             break
             except Exception as e:
-                logger.warning("SelfMonitor: pane capture failed for %s: %s", w.window_id, e)
+                logger.error("SelfMonitor: pane capture failed for %s: %s", w.window_id, e, exc_info=True)
 
             results[w.window_id] = entry
 
@@ -375,8 +375,8 @@ class SelfMonitor:
                 for w in windows:
                     if w.window_id == wid and w.pane_current_command == expected_process:
                         return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("SelfMonitor: verify_restart list_windows failed: %s", e)
         return False
 
     async def _kill_claude(self, wid: str) -> bool:
@@ -423,40 +423,48 @@ class SelfMonitor:
             pane_text = await self._tmux.capture_pane(wid)
             if pane_text and "no conversation found" in pane_text.lower():
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("SelfMonitor: pane capture error in session check: %s", e, exc_info=True)
+            return True  # Conservative: assume session not found to avoid infinite loop
         return False
 
     def _clear_session_id(self, wid: str, window_name: str) -> None:
         """Remove stale session_id from session_map.json so next restart falls back to --continue."""
+        import fcntl
         session_map_file = _backend_config.session_map_file
         if not session_map_file.exists():
             return
+        lock_path = session_map_file.with_suffix(".lock")
         try:
-            data = json.loads(session_map_file.read_text())
-            prefix = f"{_backend_config.tmux_session_name}:"
-            old_sid = "?"
-            cleared = False
-            # Clear by window_id key
-            key_by_id = f"{prefix}{wid}"
-            if key_by_id in data:
-                old_sid = data[key_by_id].get("session_id", "?")
-                del data[key_by_id]
-                cleared = True
-            # Clear by window_name match
-            for key in list(data.keys()):
-                if key.startswith(prefix) and isinstance(data[key], dict):
-                    if data[key].get("window_name") == window_name:
-                        old_sid = data[key].get("session_id", "?")
-                        del data[key]
+            with open(lock_path, "w") as lock_f:
+                fcntl.flock(lock_f, fcntl.LOCK_EX)
+                try:
+                    data = json.loads(session_map_file.read_text())
+                    prefix = f"{_backend_config.tmux_session_name}:"
+                    old_sid = "?"
+                    cleared = False
+                    # Clear by window_id key
+                    key_by_id = f"{prefix}{wid}"
+                    if key_by_id in data:
+                        old_sid = data[key_by_id].get("session_id", "?")
+                        del data[key_by_id]
                         cleared = True
-            if cleared:
-                session_map_file.write_text(json.dumps(data, indent=2))
-                logger.warning(
-                    "SelfMonitor: cleared stale session_id (was %s) for window %s (%s) — "
-                    "next restart will use --continue",
-                    old_sid, wid, window_name,
-                )
+                    # Clear by window_name match
+                    for key in list(data.keys()):
+                        if key.startswith(prefix) and isinstance(data[key], dict):
+                            if data[key].get("window_name") == window_name:
+                                old_sid = data[key].get("session_id", "?")
+                                del data[key]
+                                cleared = True
+                    if cleared:
+                        session_map_file.write_text(json.dumps(data, indent=2))
+                        logger.warning(
+                            "SelfMonitor: cleared stale session_id (was %s) for window %s (%s) — "
+                            "next restart will use --continue",
+                            old_sid, wid, window_name,
+                        )
+                finally:
+                    fcntl.flock(lock_f, fcntl.LOCK_UN)
         except (json.JSONDecodeError, OSError) as e:
             logger.error("SelfMonitor: failed to clear session_id: %s", e)
 
@@ -553,6 +561,7 @@ class SelfMonitor:
                 verified = await self._verify_restart(wid)
                 if verified:
                     self._backoff.record_success(backoff_key)
+                    self._consecutive_degraded[wid] = 0
                     note = "已重启并验证成功"
                 else:
                     self._backoff.record_failure(backoff_key)

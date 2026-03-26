@@ -20,6 +20,8 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
+_MAX_OUTPUT_ENTRIES = 2000
+
 
 class OpenCodeSubprocessDriver:
     """Drives OpenCode via subprocess for agentgate-backend."""
@@ -74,7 +76,8 @@ class OpenCodeSubprocessDriver:
             await self._queue.put((text, None))
             logger.info("OpenCode subprocess: queued (size=%d)", self._queue.qsize())
             return True, "Queued"
-        asyncio.create_task(self._process_message(text, None))
+        task = asyncio.create_task(self._process_message(text, None))
+        task.add_done_callback(lambda t: t.cancelled() or (t.exception() and logger.error("OC process task failed: %s", t.exception())))
         return True, "Injected"
 
     async def read_output(self, window_name: str, since: int) -> OutputResult:
@@ -122,7 +125,14 @@ class OpenCodeSubprocessDriver:
         self._append_output("user", text)
 
         try:
-            await self._run_opencode(text)
+            await asyncio.wait_for(self._run_opencode(text), timeout=300)
+        except asyncio.TimeoutError:
+            logger.error("OpenCode: process timed out after 300s, killing")
+            if self._current_proc and self._current_proc.returncode is None:
+                self._current_proc.kill()
+                await self._current_proc.wait()
+            self._last_error = "Process timed out after 300s"
+            self._append_output("assistant", "⚠️ OpenCode error: timed out after 300s", content_type="text")
         except Exception as e:
             logger.error("OpenCode process error: %s", e, exc_info=True)
             self._last_error = f"{type(e).__name__}: {e}"
@@ -192,9 +202,13 @@ class OpenCodeSubprocessDriver:
 
             self._handle_event(event, collected_text)
 
-        # Wait for process to finish
-        stderr_bytes = await proc.stderr.read()
-        await proc.wait()
+        # Drain stderr and wait for process to finish (avoids pipe deadlock)
+        try:
+            _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            stderr_bytes = b""
+            await proc.wait()
 
         if proc.returncode != 0:
             stderr_text = stderr_bytes.decode().strip()
@@ -263,10 +277,11 @@ class OpenCodeSubprocessDriver:
             error_msg = event.get("error", str(event))
             logger.error("OpenCode event error: %s", error_msg)
             self._last_error = str(error_msg)[:200]
+            self._append_output("assistant", f"⚠️ Error: {error_msg}", content_type="text")
 
         elif event_type == "step_finish":
             part = event.get("part", {})
-            cost = part.get("cost", 0)
+            cost = float(part.get("cost") or 0)
             tokens = part.get("tokens", {})
             logger.info(
                 "OpenCode: step_finish cost=%.4f tokens=%s",
@@ -289,6 +304,10 @@ class OpenCodeSubprocessDriver:
         }
         self._output.append(msg)
         self._output_bytes += msg["_size"]
+        # Trim oldest half when buffer exceeds max size (_output_bytes stays monotonic)
+        if len(self._output) > _MAX_OUTPUT_ENTRIES:
+            trim_count = _MAX_OUTPUT_ENTRIES // 2
+            self._output = self._output[trim_count:]
 
     # ------------------------------------------------------------------
     # State persistence
@@ -317,4 +336,4 @@ class OpenCodeSubprocessDriver:
                         "OpenCode: restored session_id=%s", self._session_id
                     )
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Failed to load opencode state: %s", e)
+            logger.error("Failed to load opencode state: %s", e, exc_info=True)

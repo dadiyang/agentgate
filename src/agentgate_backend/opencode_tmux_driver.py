@@ -89,10 +89,17 @@ class OpenCodeTmuxDriver:
 
         since: millisecond timestamp (0 on first call).
         """
+        # Always refresh session_id — OC may create a new session at any time
+        # (e.g. user starts a new conversation, or session is compacted).
+        latest = self._find_latest_session_id()
+        if latest:
+            if latest != self._session_id:
+                logger.info("OpenCode driver: session changed %s → %s", self._session_id, latest)
+                self._session_id = latest
+                return OutputResult(messages=[], count=0, cursor=0)
+            # session unchanged, no need to reassign
         if not self._session_id:
-            self._session_id = self._find_latest_session_id()
-            if not self._session_id:
-                return OutputResult(messages=[], count=0, cursor=since)
+            return OutputResult(messages=[], count=0, cursor=since)
 
         conn = self._get_db()
         if conn is None:
@@ -112,6 +119,13 @@ class OpenCodeTmuxDriver:
             rows = cur.fetchall()
         except sqlite3.Error as e:
             logger.error("OpenCode driver: SQLite read error: %s", e)
+            # Connection may be stale (DB rebuilt). Reset for next call.
+            if self._db:
+                try:
+                    self._db.close()
+                except Exception:
+                    pass
+                self._db = None
             return OutputResult(messages=[], count=0, cursor=since)
 
         messages = []
@@ -140,7 +154,9 @@ class OpenCodeTmuxDriver:
 
     @property
     def process_name(self) -> str:
-        return ".opencode"
+        # tmux reports "node" as pane_current_command (OC's launcher),
+        # not ".opencode" (the actual binary, a child of node).
+        return "node"
 
     @property
     def error_patterns(self) -> list[tuple[str, str]]:
@@ -157,7 +173,7 @@ class OpenCodeTmuxDriver:
         try:
             uri = f"file:{self._db_path}?mode=ro"
             conn = sqlite3.connect(uri, uri=True, timeout=5)
-            conn.execute("PRAGMA journal_mode=WAL")
+            # WAL pragma not needed for read-only connections (mode=ro); skip it.
             self._db = conn
             logger.info("OpenCode driver: connected to DB at %s", self._db_path)
             return conn
@@ -176,7 +192,6 @@ class OpenCodeTmuxDriver:
             )
             row = cur.fetchone()
             if row:
-                self._session_id = row[0]
                 return row[0]
         except sqlite3.Error as e:
             logger.error("OpenCode driver: session lookup error: %s", e)
@@ -208,6 +223,9 @@ def _convert_part(part: dict, role: str) -> dict | None:
         return {"role": role, "text": summary, "content_type": "tool_use"}
     if pt == "tool-result":
         output = part.get("output", "")
-        if output and isinstance(output, str):
+        if isinstance(output, str) and output:
             return {"role": role, "text": output[:500], "content_type": "tool_result"}
+        elif isinstance(output, (dict, list)):
+            import json
+            return {"role": role, "text": json.dumps(output, ensure_ascii=False)[:500], "content_type": "tool_result"}
     return None
