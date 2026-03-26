@@ -19,6 +19,7 @@ class TelegramBotConfig(BaseModel):
     bot_token: str
     bot_id: str = ""  # Optional: auto-detected from get_me() if empty
     proxy: str = ""
+    mention_only: bool = False  # If True, only process messages that @mention this bot
 
 
 class TelegramConfig(BaseModel):

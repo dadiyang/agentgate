@@ -24,10 +24,12 @@ class TelegramAdapter(ChannelAdapter):
         on_message: OnMessageCallback,
         proxy: str = "",
         bot_id_override: str = "",
+        mention_only: bool = False,
     ):
         super().__init__(name="telegram", on_message=on_message)
         self._bot_token = bot_token
         self._bot_id_override = bot_id_override
+        self._mention_only = mention_only
         proxy = proxy or os.environ.get("HTTPS_PROXY", "")
         # Increase pool_timeout (default 1.0s) to prevent Pool timeout during
         # shutdown when multiple bots compete for connections to commit offsets.
@@ -93,6 +95,28 @@ class TelegramAdapter(ChannelAdapter):
         msg = update.effective_message
         if not msg or not msg.text:
             return
+        # mention_only mode: skip messages that don't @mention this bot,
+        # and strip the bot @mention from the text before forwarding.
+        if self._mention_only:
+            bot_mention = f"@{context.bot.username}".lower()
+            bot_entities = [
+                e for e in (msg.entities or [])
+                if e.type == "mention"
+                and msg.text[e.offset : e.offset + e.length].lower() == bot_mention
+            ]
+            if not bot_entities:
+                logger.debug(
+                    "TG ignored (mention_only) [%s]: update_id=%s",
+                    self._bot_username, update.update_id,
+                )
+                return
+            # Remove bot @mention(s) from text using precise entity offsets
+            text = msg.text
+            for e in sorted(bot_entities, key=lambda x: x.offset, reverse=True):
+                text = text[: e.offset] + text[e.offset + e.length :]
+            text = text.strip()
+        else:
+            text = msg.text
         chat_id = str(msg.chat_id)
         user = msg.from_user
         user_id = str(user.id) if user else ""
@@ -108,7 +132,7 @@ class TelegramAdapter(ChannelAdapter):
                 user_id,
                 user_name,
                 chat_title,
-                msg.text,
+                text,
                 str(update.update_id),
             )
 

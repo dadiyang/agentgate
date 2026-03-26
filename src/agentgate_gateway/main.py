@@ -140,6 +140,7 @@ async def run(config: GatewayConfig, config_path: Path | None = None) -> None:
                 on_message,
                 proxy=bot_cfg.proxy,
                 bot_id_override=bot_cfg.bot_id,
+                mention_only=bot_cfg.mention_only,
             )
             adapter_key = f"telegram:{bot_cfg.bot_id}" if bot_cfg.bot_id else f"telegram"
             adapters[adapter_key] = adapter
