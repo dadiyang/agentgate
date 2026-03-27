@@ -235,7 +235,7 @@ class OutputPoller:
                 combined = "\n\n".join(texts)
             for channel_type, bot_id, chat_id in bindings:
                 task = asyncio.create_task(
-                    self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined)
+                    self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined, poll_offset=offset)
                 )
                 self._push_tasks.add(task)
                 task.add_done_callback(self._push_tasks.discard)
@@ -283,7 +283,8 @@ class OutputPoller:
             logger.error("confirm_processed error for %s: %s", backend_id, e, exc_info=True)
 
     async def _push_to_channel(
-        self, backend_id: str, channel_type: str, bot_id: str, chat_id: str, text: str
+        self, backend_id: str, channel_type: str, bot_id: str, chat_id: str, text: str,
+        poll_offset: int = 0,
     ):
         # Split raw text FIRST, then format each part for the channel.
         # Formatting (e.g. Feishu JSON) can change size and structure;
@@ -294,15 +295,14 @@ class OutputPoller:
         for i, part in enumerate(parts):
             # Include shard_index in hash to avoid dedup collision when
             # different shards have identical content (Bug #6).
-            # Include hour bucket so identical content at different times is
-            # not permanently deduped (e.g. agent replies "ok" twice).
-            # Raw offset is NOT included — that caused dedup bypass after
-            # gateway restart (P0 Bug #11).
+            # Include poll offset so same content in different poll cycles
+            # gets distinct hashes (agent can legitimately reply "ok" twice).
+            # P0 Bug #11 (offset=0 after restart) is no longer a risk because
+            # _seed_offset now skips to current position instead of resetting.
             msg_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
-            hour_bucket = now[:13]  # "2026-03-27T15" — 1-hour granularity
             content_hash = hashlib.sha256(
-                f"{backend_id}:{channel_type}:{bot_id}:{chat_id}:{i}:{hour_bucket}:{part}".encode()
+                f"{backend_id}:{channel_type}:{bot_id}:{chat_id}:{i}:{poll_offset}:{part}".encode()
             ).hexdigest()
 
             # E-7: Dedup check — skip if same content already pushed for this backend
