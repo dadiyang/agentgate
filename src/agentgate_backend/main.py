@@ -76,6 +76,11 @@ async def run(config: BackendConfig) -> None:
         config.name, config.http_port, config.agent_type,
     )
 
+    # Ensure OpenCode instances managed by agentgate have question prompts disabled.
+    # OC's AskUser dialog blocks the TUI and can't be answered via IM/tmux inject.
+    if config.agent_type == "opencode":
+        _ensure_opencode_no_question(config.work_dir)
+
     # Auto-create initial window if work_dir is configured
     work_dir = config.work_dir
     if work_dir != Path.home():
@@ -119,6 +124,39 @@ async def run(config: BackendConfig) -> None:
     if hasattr(driver, "close"):
         driver.close()
     await runner.cleanup()
+
+
+def _ensure_opencode_no_question(work_dir: Path) -> None:
+    """Ensure the project-level opencode.json disables AskUser prompts.
+
+    OC's AskUser dialog blocks the TUI and cannot be answered via IM or
+    tmux inject. For all agentgate-managed OC instances, question must be
+    denied so the agent never stalls waiting for interactive input.
+    """
+    import json as _json
+
+    oc_config_path = work_dir / "opencode.json"
+    try:
+        if oc_config_path.exists():
+            data = _json.loads(oc_config_path.read_text())
+        else:
+            data = {}
+
+        permission = data.get("permission", {})
+        if isinstance(permission, str):
+            # "allow" → convert to object, keep the global default
+            permission = {"question": "deny"}
+        elif isinstance(permission, dict):
+            permission["question"] = "deny"
+        else:
+            permission = {"question": "deny"}
+
+        if data.get("permission") != permission:
+            data["permission"] = permission
+            oc_config_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            logger.info("OpenCode config: set question=deny in %s", oc_config_path)
+    except Exception as e:
+        logger.error("Failed to patch opencode.json at %s: %s", oc_config_path, e)
 
 
 def _create_driver(config: BackendConfig, tmux):
