@@ -137,7 +137,8 @@ class OpenCodeTmuxDriver:
             try:
                 part = json.loads(part_data_str)
                 msg_meta = json.loads(msg_data_str)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning("OC read_output: bad part data at ts=%d: %s", time_created, e)
                 continue
             # Only emit assistant messages. User messages from SQLite include
             # startup/recovery commands (e.g. "opencode -m ... --session ...")
@@ -148,6 +149,11 @@ class OpenCodeTmuxDriver:
             if converted:
                 messages.append(converted)
 
+        if messages:
+            logger.info(
+                "OC output: session=%s %d messages (cursor %d→%d)",
+                self._session_id[:12] if self._session_id else "?", len(messages), since, max_ts,
+            )
         return OutputResult(messages=messages, count=len(messages), cursor=max_ts)
 
     # --- Health ---

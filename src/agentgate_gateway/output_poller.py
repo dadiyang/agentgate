@@ -219,6 +219,13 @@ class OutputPoller:
             m for m in data["messages"] if m.get("content_type") == "text"
         ]
         if not text_messages:
+            if data.get("messages"):
+                # Had messages but all filtered — log what was filtered
+                filtered_types = [m.get("content_type", "?") for m in data["messages"]]
+                logger.debug(
+                    "Poll %s: %d messages filtered to 0 text (types: %s)",
+                    backend_id, len(data["messages"]), filtered_types,
+                )
             return
 
         # Group consecutive messages by role so user echo and assistant
@@ -238,7 +245,16 @@ class OutputPoller:
                     self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined, poll_offset=offset)
                 )
                 self._push_tasks.add(task)
-                task.add_done_callback(self._push_tasks.discard)
+
+                def _on_push_done(t: asyncio.Task, _bid: str = backend_id) -> None:
+                    self._push_tasks.discard(t)
+                    if t.cancelled():
+                        return
+                    exc = t.exception()
+                    if exc:
+                        logger.error("Push task failed for backend=%s: %s", _bid, exc, exc_info=exc)
+
+                task.add_done_callback(_on_push_done)
 
     async def _confirm_processed(self, backend_id: str, url: str, token: str):
         """Confirm all pending inbound messages for this backend as processed.
@@ -307,7 +323,10 @@ class OutputPoller:
 
             # E-7: Dedup check — skip if same content already pushed for this backend
             if await self._db.has_content_hash(backend_id, content_hash):
-                logger.debug("Outbound dedup: content_hash=%s already exists, skipping", content_hash[:16])
+                logger.info(
+                    "Outbound dedup skip: backend=%s channel=%s:%s chat=%s hash=%s content=%s",
+                    backend_id, channel_type, bot_id, chat_id, content_hash[:16], text[:40],
+                )
                 continue
 
             # Persist BEFORE push (crash safety)
@@ -323,6 +342,10 @@ class OutputPoller:
                     "shard_total": len(parts),
                     "content_hash": content_hash,
                 }
+            )
+            logger.info(
+                "Outbound save: msg_id=%s backend=%s → %s:%s chat=%s len=%d",
+                msg_id, backend_id, channel_type, bot_id, chat_id, len(part),
             )
 
             # Push to channel with retry — try channel:bot_id first (multi-bot),
