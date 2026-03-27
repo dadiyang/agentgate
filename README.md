@@ -27,42 +27,121 @@ Feishu / Telegram / HTTP  →  AgentGate Gateway  →  Agent Backend  →  CLI A
 
 ## Quick start
 
+### Install
+
 ```bash
 pip install im-agent-gate
 ```
 
+### 1. Create a backend instance
+
+Each agent needs a backend instance. Create the instance directory and `.env` config:
+
+```bash
+mkdir -p ~/.agentgate/backends/my-agent
+cat > ~/.agentgate/backends/my-agent/.env << 'EOF'
+AGENTGATE_NAME=my-agent
+AGENTGATE_PORT=8903
+AGENTGATE_HTTP_PORT=8903
+AGENTGATE_API_TOKEN=my-secret-token
+AGENTGATE_WORK_DIR=/path/to/your/project
+AGENTGATE_TMUX_SESSION_NAME=agentgate-my-agent
+AGENTGATE_AGENT_TYPE=claude-code
+AGENTGATE_AGENT_MODE=tmux
+AGENTGATE_CLAUDE_COMMAND=claude --dangerously-skip-permissions
+AGENTGATE_PROCESS_NAME=claude
+EOF
+```
+
+Key settings:
+
+| Setting | Description |
+|---------|-------------|
+| `AGENTGATE_NAME` | Unique instance name |
+| `AGENTGATE_PORT` / `HTTP_PORT` | HTTP API port (must match, one per instance) |
+| `AGENTGATE_API_TOKEN` | Bearer token for gateway ↔ backend auth |
+| `AGENTGATE_WORK_DIR` | Agent's working directory |
+| `AGENTGATE_AGENT_TYPE` | `claude-code` or `opencode` |
+| `AGENTGATE_AGENT_MODE` | `tmux` (persistent session) or `subprocess` (stdin/stdout) |
+
+For OpenCode with a local model:
+
+```bash
+AGENTGATE_AGENT_TYPE=opencode
+AGENTGATE_AGENT_MODE=tmux
+AGENTGATE_OPENCODE_MODEL=local/Qwen3-32B
+AGENTGATE_PROCESS_NAME=node
+```
+
+OpenCode instances get automatic permission configuration — all tools allowed, interactive prompts disabled (they can't be answered via IM).
+
+### 2. Configure the gateway
+
 ```yaml
-# config.yaml
+# ~/.agentgate/gateway/config.yaml
+
 backends:
   my-agent:
     url: http://127.0.0.1:8903
     api_token: my-secret-token
-    default_window: main
+    default_window: my-project    # must match WORK_DIR basename
 
 channels:
   telegram:
-    bot_token: "123456:ABC-DEF..."
+    bots:
+      - bot_id: my_bot
+        bot_token: "123456:ABC-DEF..."
+        proxy: "http://127.0.0.1:7897"   # optional, for regions that need it
 
 routes:
   - channel: telegram
-    bot_id: "123456"
-    chat_id: "-100123456789"
+    bot_id: my_bot
+    chat_id: "7003732745"       # user or group chat ID
     backend: my-agent
 ```
 
-```bash
-# Start a backend (manages the agent process)
-agentgate-backend --name my-agent --port 8903 --work-dir ~/my-project
+**Important:** `default_window` must equal the basename of `WORK_DIR`. If `WORK_DIR=/home/user/my-project`, then `default_window: my-project`. Mismatch = output never reaches IM.
 
-# Start the gateway (connects IM channels to backends)
-agentgate-gateway --config config.yaml
+### 3. Start
+
+```bash
+# Create tmux session (tmux mode only, first time)
+tmux new-session -d -s agentgate-my-agent -n __main__
+
+# Start the backend
+agentgate-backend --name my-agent
+
+# Start the gateway
+agentgate-gateway --config ~/.agentgate/gateway/config.yaml
 ```
 
-Send a message in your Telegram group. The agent gets it, works on it, and the reply shows up in the same group.
+Or use systemd (recommended for production):
+
+```bash
+# Template service included in deploy/
+sudo cp deploy/agentgate-backend@.service /etc/systemd/system/
+sudo cp deploy/agentgate-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload
+
+sudo systemctl enable --now agentgate-backend@my-agent
+sudo systemctl enable --now agentgate-gateway
+```
+
+### 4. Verify
+
+```bash
+# Check backend health
+curl http://127.0.0.1:8903/api/health -H "Authorization: Bearer my-secret-token"
+
+# Check gateway health
+curl http://127.0.0.1:8800/api/health
+```
+
+Send a message in your Telegram chat. The agent gets it, works on it, and the reply shows up in the same chat.
 
 ### HTTP-only mode (no IM needed)
 
-Don't use IM? Skip the channel config entirely. Control agents via HTTP:
+Skip the channel config entirely. Control agents via HTTP:
 
 ```bash
 # Send a message to an agent
@@ -71,7 +150,8 @@ curl -X POST http://localhost:8800/api/inject \
   -d '{"backend_id": "my-agent", "text": "refactor the auth module"}'
 
 # Read agent output
-curl "http://localhost:8903/api/output/main?since=0"
+curl "http://localhost:8903/api/output/my-project?since=0" \
+  -H "Authorization: Bearer my-secret-token"
 ```
 
 ---
@@ -124,18 +204,17 @@ Adding a new agent type means implementing the `AgentDriver` protocol — about 
 
 ### Mix agents, cut costs
 
-Claude Code for complex work, OpenCode with qwen-plus for routine tasks at roughly 1/20 the cost:
+Claude Code for complex work, OpenCode with a local model (e.g. Qwen3.5 via llama-server) for routine tasks at a fraction of the cost:
 
-```yaml
-backends:
-  project-dev:
-    agent_type: claude-code    # complex refactoring, architecture
-    agent_mode: tmux
+```bash
+# Backend 1: Claude Code for architecture work
+AGENTGATE_AGENT_TYPE=claude-code
+AGENTGATE_AGENT_MODE=tmux
 
-  project-qa:
-    agent_type: opencode       # log analysis, test runs, boilerplate
-    agent_mode: subprocess
-    model: qwen-plus
+# Backend 2: OpenCode + local Qwen3.5 for routine tasks
+AGENTGATE_AGENT_TYPE=opencode
+AGENTGATE_AGENT_MODE=tmux
+AGENTGATE_OPENCODE_MODEL=local/Qwen3.5-35B
 ```
 
 Same IM interface, same routing, same message persistence. The person sending messages doesn't need to know which agent is on the other end.
@@ -212,7 +291,7 @@ Feishu going down doesn't affect Telegram. A backend crash doesn't take down the
 │                    Agent Backends (per instance)             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
 │  │  project-dev  │  │  project-qa  │  │  trade-dev   │       │
-│  │  CC + tmux    │  │  OC + sub    │  │  CC + tmux   │       │
+│  │  CC + tmux    │  │  OC + tmux   │  │  CC + tmux   │       │
 │  │  :8903        │  │  :8904       │  │  :8905       │       │
 │  └──────────────┘  └──────────────┘  └──────────────┘       │
 └─────────────────────────────────────────────────────────────┘
@@ -233,7 +312,7 @@ The two layers talk over HTTP. Same machine or different machines, your call.
 | Method | Path | What it does |
 |--------|------|-------------|
 | GET | `/health` | System status — channels, backends, pending messages |
-| POST | `/api/messages/query` | Query message history |
+| POST | `/api/messages/query` | Query message history with filters |
 | POST | `/api/admin/reload` | Reload config without restart |
 | POST | `/api/inject` | Send a message to a backend (bypasses IM) |
 
@@ -244,6 +323,34 @@ The two layers talk over HTTP. Same machine or different machines, your call.
 | GET | `/health` | Backend and agent health |
 | POST | `/api/inject` | Send message to the agent |
 | GET | `/api/output/{window}?since={offset}` | Read new output since offset |
+
+---
+
+## Troubleshooting
+
+### Agent replies not reaching IM
+
+Check the output pipeline logs:
+
+```bash
+journalctl -u agentgate-gateway --since "10 min ago" | grep "backend=my-agent"
+```
+
+A healthy message shows 4 log lines:
+
+1. `Polled N new messages from backend=my-agent` — poller read output from backend
+2. `Outbound save: msg_id=xxx backend=my-agent → telegram:bot chat=xxx` — message persisted
+3. `TG outbound [bot]: chat_id=xxx text=xxx` — push started
+4. `TG send ok [bot]: elapsed=xxxms` — push succeeded
+
+Missing step tells you where it broke. Common causes:
+
+| Missing | Likely cause |
+|---------|-------------|
+| No `Polled` | Wrong `default_window` (must match WORK_DIR basename) or session_id mismatch |
+| `Polled` but no `Outbound save` | Content deduped (`dedup skip` in logs) or all messages filtered (`filtered to 0 text`) |
+| `Outbound save` but no `TG outbound` | Push task error (`Push task failed` in logs) |
+| `TG outbound` but no `send ok` | Telegram API error (timeout, rate limit, proxy issue) |
 
 ---
 

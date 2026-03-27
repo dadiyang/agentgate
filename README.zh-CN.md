@@ -27,42 +27,121 @@ AgentGate 架在你的 IM / HTTP 客户端和 CLI Agent（Claude Code、OpenCode
 
 ## 快速开始
 
+### 安装
+
 ```bash
 pip install im-agent-gate
 ```
 
+### 1. 创建后端实例
+
+每个 Agent 需要一个后端实例。创建实例目录和 `.env` 配置：
+
+```bash
+mkdir -p ~/.agentgate/backends/my-agent
+cat > ~/.agentgate/backends/my-agent/.env << 'EOF'
+AGENTGATE_NAME=my-agent
+AGENTGATE_PORT=8903
+AGENTGATE_HTTP_PORT=8903
+AGENTGATE_API_TOKEN=my-secret-token
+AGENTGATE_WORK_DIR=/path/to/your/project
+AGENTGATE_TMUX_SESSION_NAME=agentgate-my-agent
+AGENTGATE_AGENT_TYPE=claude-code
+AGENTGATE_AGENT_MODE=tmux
+AGENTGATE_CLAUDE_COMMAND=claude --dangerously-skip-permissions
+AGENTGATE_PROCESS_NAME=claude
+EOF
+```
+
+主要配置项：
+
+| 配置项 | 说明 |
+|--------|------|
+| `AGENTGATE_NAME` | 实例唯一标识 |
+| `AGENTGATE_PORT` / `HTTP_PORT` | HTTP API 端口（两个必须一致，每个实例独占） |
+| `AGENTGATE_API_TOKEN` | gateway ↔ backend 的认证 token |
+| `AGENTGATE_WORK_DIR` | Agent 的工作目录 |
+| `AGENTGATE_AGENT_TYPE` | `claude-code` 或 `opencode` |
+| `AGENTGATE_AGENT_MODE` | `tmux`（持久会话）或 `subprocess`（stdin/stdout） |
+
+OpenCode + 本地模型的配置：
+
+```bash
+AGENTGATE_AGENT_TYPE=opencode
+AGENTGATE_AGENT_MODE=tmux
+AGENTGATE_OPENCODE_MODEL=local/Qwen3-32B
+AGENTGATE_PROCESS_NAME=node
+```
+
+OpenCode 实例会自动配置权限——所有工具允许，交互式提示禁用（无法通过 IM 回答）。
+
+### 2. 配置网关
+
 ```yaml
-# config.yaml
+# ~/.agentgate/gateway/config.yaml
+
 backends:
   my-agent:
     url: http://127.0.0.1:8903
     api_token: my-secret-token
-    default_window: main
+    default_window: my-project    # 必须等于 WORK_DIR 的 basename
 
 channels:
   telegram:
-    bot_token: "123456:ABC-DEF..."
+    bots:
+      - bot_id: my_bot
+        bot_token: "123456:ABC-DEF..."
+        proxy: "http://127.0.0.1:7897"   # 可选，国内服务器需要
 
 routes:
   - channel: telegram
-    bot_id: "123456"
-    chat_id: "-100123456789"
+    bot_id: my_bot
+    chat_id: "7003732745"       # 用户或群组的 chat ID
     backend: my-agent
 ```
 
-```bash
-# 启动后端（管理 Agent 进程）
-agentgate-backend --name my-agent --port 8903 --work-dir ~/my-project
+**注意：** `default_window` 必须等于 `WORK_DIR` 的目录名。比如 `WORK_DIR=/home/user/my-project`，则 `default_window: my-project`。不匹配 = 输出永远到不了 IM。
 
-# 启动网关（连接 IM 通道到后端）
-agentgate-gateway --config config.yaml
+### 3. 启动
+
+```bash
+# 创建 tmux session（仅 tmux 模式，首次需要）
+tmux new-session -d -s agentgate-my-agent -n __main__
+
+# 启动后端
+agentgate-backend --name my-agent
+
+# 启动网关
+agentgate-gateway --config ~/.agentgate/gateway/config.yaml
 ```
 
-在 Telegram 群里发条消息，Agent 收到、处理、回复出现在同一个群里。
+或者用 systemd（生产环境推荐）：
+
+```bash
+# deploy/ 目录下有模板
+sudo cp deploy/agentgate-backend@.service /etc/systemd/system/
+sudo cp deploy/agentgate-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload
+
+sudo systemctl enable --now agentgate-backend@my-agent
+sudo systemctl enable --now agentgate-gateway
+```
+
+### 4. 验证
+
+```bash
+# 检查后端健康
+curl http://127.0.0.1:8903/api/health -H "Authorization: Bearer my-secret-token"
+
+# 检查网关健康
+curl http://127.0.0.1:8800/api/health
+```
+
+在 Telegram 里发条消息，Agent 收到、处理、回复出现在同一个聊天里。
 
 ### 纯 HTTP 模式（不需要 IM）
 
-不用 IM？跳过通道配置，直接用 HTTP 控制 Agent：
+跳过通道配置，直接用 HTTP 控制 Agent：
 
 ```bash
 # 给 Agent 发消息
@@ -71,7 +150,8 @@ curl -X POST http://localhost:8800/api/inject \
   -d '{"backend_id": "my-agent", "text": "重构 auth 模块"}'
 
 # 读 Agent 输出
-curl "http://localhost:8903/api/output/main?since=0"
+curl "http://localhost:8903/api/output/my-project?since=0" \
+  -H "Authorization: Bearer my-secret-token"
 ```
 
 ---
@@ -80,9 +160,9 @@ curl "http://localhost:8903/api/output/main?since=0"
 
 消息按 `(通道, Bot, 群组)` 三元组路由——**同一个 Bot** 在**不同群**里可以对接**不同的 Agent**。这是在不增加 bot 数量的情况下扩展项目的关键：
 
-- **不用一个 Agent 一个 Bot。** 不需要为每个 Agent 单独创建 bot。一个 bot 覆盖所有项目——放到不同群里就行。
-- **群 = 上下文。** 用户在对应项目的群里发消息，路由对用户透明——发了消息就有对应的 Agent 回应。
-- **新项目秒级接入。** 建个群、把 bot 拉进去、加一行路由配置、热加载。不用注册新 bot，不用管理新 token。
+- **不用一个 Agent 一个 Bot。** 一个 bot 覆盖所有项目——放到不同群里就行。
+- **群 = 上下文。** 用户在对应项目的群里发消息，路由对用户透明。
+- **新项目秒级接入。** 建个群、把 bot 拉进去、加一行路由配置、热加载。不用注册新 bot。
 
 ```yaml
 routes:
@@ -124,18 +204,17 @@ AgentGate 不关心你跑什么 CLI Agent。`AgentDriver` 协议把差异抹平�
 
 ### 混用 Agent 控制成本
 
-Claude Code 做复杂任务，OpenCode + qwen-plus 做日常杂活，后者成本大约是前者的 1/20：
+Claude Code 做复杂任务，OpenCode + 本地模型（如 Qwen3.5 通过 llama-server）做日常杂活：
 
-```yaml
-backends:
-  project-dev:
-    agent_type: claude-code    # 复杂重构、架构决策
-    agent_mode: tmux
+```bash
+# 后端 1：Claude Code 做架构工作
+AGENTGATE_AGENT_TYPE=claude-code
+AGENTGATE_AGENT_MODE=tmux
 
-  project-qa:
-    agent_type: opencode       # 日志分析、跑测试、写样板代码
-    agent_mode: subprocess
-    model: qwen-plus
+# 后端 2：OpenCode + 本地 Qwen3.5 做常规任务
+AGENTGATE_AGENT_TYPE=opencode
+AGENTGATE_AGENT_MODE=tmux
+AGENTGATE_OPENCODE_MODEL=local/Qwen3.5-35B
 ```
 
 同一个 IM 界面，同一套路由，同一套消息持久化。发消息的人不需要知道对面是哪个 Agent。
@@ -151,7 +230,7 @@ backends:
 | 需要装 tmux | 是 | 不需要 |
 | 输出延迟 | 约 2 秒（文件轮询）| 实时（stdout 流式）|
 
-**tmux 模式**：Agent 运行在持久化的 tmux session 里。你可以 `tmux attach` 实时观察它在干什么，也可以在它工作过程中发消息纠偏——Agent 在两次工具调用之间会看到你的消息。适合重要任务。
+**tmux 模式**：Agent 运行在持久化的 tmux session 里。你可以 `tmux attach` 实时观察，也可以发消息纠偏。适合重要任务。
 
 **subprocess 模式**：Agent 作为 stdin/stdout 子进程运行。部署更简单，不依赖 tmux，输出实时流式推送。适合常规任务或无人值守自动化。
 
@@ -211,7 +290,7 @@ curl -X POST http://localhost:8800/api/messages/query \
 │                  Agent 后端（每实例一个）                     │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
 │  │  project-dev  │  │  project-qa  │  │  trade-dev   │       │
-│  │  CC + tmux    │  │  OC + sub    │  │  CC + tmux   │       │
+│  │  CC + tmux    │  │  OC + tmux   │  │  CC + tmux   │       │
 │  │  :8903        │  │  :8904       │  │  :8905       │       │
 │  └──────────────┘  └──────────────┘  └──────────────┘       │
 └─────────────────────────────────────────────────────────────┘
@@ -232,7 +311,7 @@ curl -X POST http://localhost:8800/api/messages/query \
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 系统状态——通道、后端、待处理消息 |
-| POST | `/api/messages/query` | 查询消息历史 |
+| POST | `/api/messages/query` | 按条件查询消息历史 |
 | POST | `/api/admin/reload` | 热加载配置 |
 | POST | `/api/inject` | 直接向后端发消息（绕过 IM） |
 
@@ -243,6 +322,34 @@ curl -X POST http://localhost:8800/api/messages/query \
 | GET | `/health` | 后端和 Agent 健康状态 |
 | POST | `/api/inject` | 向 Agent 发消息 |
 | GET | `/api/output/{window}?since={offset}` | 读取 offset 之后的新输出 |
+
+---
+
+## 排查指南
+
+### Agent 回复没到达 IM
+
+查看出站管道日志：
+
+```bash
+journalctl -u agentgate-gateway --since "10 min ago" | grep "backend=my-agent"
+```
+
+正常消息有 4 行日志：
+
+1. `Polled N new messages from backend=my-agent` — poller 从 backend 读到了输出
+2. `Outbound save: msg_id=xxx backend=my-agent → telegram:bot chat=xxx` — 消息已持久化
+3. `TG outbound [bot]: chat_id=xxx text=xxx` — 开始推送
+4. `TG send ok [bot]: elapsed=xxxms` — 推送成功
+
+缺哪一步就是哪里断的：
+
+| 缺失 | 可能原因 |
+|------|---------|
+| 没有 `Polled` | `default_window` 不匹配（必须等于 WORK_DIR basename）或 session_id 不对 |
+| 有 `Polled` 无 `Outbound save` | 被去重拦截（日志 `dedup skip`）或内容类型被过滤（`filtered to 0 text`） |
+| 有 `Outbound save` 无 `TG outbound` | push task 失败（日志 `Push task failed`） |
+| 有 `TG outbound` 无 `send ok` | Telegram API 失败（超时、限流、代理问题） |
 
 ---
 
