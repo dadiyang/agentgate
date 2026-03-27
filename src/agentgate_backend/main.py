@@ -135,6 +135,26 @@ def _ensure_opencode_no_question(work_dir: Path) -> None:
     """
     import json as _json
 
+    # All tools allowed (agent runs unattended), question denied (can't answer via IM).
+    _AGENTGATE_PERMISSION = {
+        "read": "allow",
+        "edit": "allow",
+        "bash": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "task": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "codesearch": "allow",
+        "todowrite": "allow",
+        "skill": "allow",
+        "lsp": "allow",
+        "external_directory": "allow",
+        "doom_loop": "allow",
+        "question": "deny",
+    }
+
     oc_config_path = work_dir / "opencode.json"
     try:
         if oc_config_path.exists():
@@ -142,19 +162,10 @@ def _ensure_opencode_no_question(work_dir: Path) -> None:
         else:
             data = {}
 
-        permission = data.get("permission", {})
-        if isinstance(permission, str):
-            # "allow" → convert to object, keep the global default
-            permission = {"question": "deny"}
-        elif isinstance(permission, dict):
-            permission["question"] = "deny"
-        else:
-            permission = {"question": "deny"}
-
-        if data.get("permission") != permission:
-            data["permission"] = permission
+        if data.get("permission") != _AGENTGATE_PERMISSION:
+            data["permission"] = _AGENTGATE_PERMISSION
             oc_config_path.write_text(_json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-            logger.info("OpenCode config: set question=deny in %s", oc_config_path)
+            logger.info("OpenCode config: patched permissions in %s", oc_config_path)
     except Exception as e:
         logger.error("Failed to patch opencode.json at %s: %s", oc_config_path, e)
 
