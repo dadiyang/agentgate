@@ -50,8 +50,10 @@ class OpenCodeTmuxDriver:
         self._model = model
         self._work_dir = work_dir
         self._db_path = db_path or _DEFAULT_DB_PATH
-        self._session_id: str = ""
         self._db: sqlite3.Connection | None = None
+        # Pre-load session_id on init so first read_output doesn't falsely
+        # detect a "session change" (empty → real_id) and flood IM with history.
+        self._session_id: str = self._find_latest_session_id()
 
     # --- Lifecycle ---
 
