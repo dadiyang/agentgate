@@ -96,7 +96,12 @@ class OpenCodeTmuxDriver:
             if latest != self._session_id:
                 logger.info("OpenCode driver: session changed %s → %s", self._session_id, latest)
                 self._session_id = latest
-                return OutputResult(messages=[], count=0, cursor=0)
+                # Seed to the current position in the new session — skip history.
+                # Returning cursor=0 would cause the poller to replay ALL content
+                # from the new session (including compacted context), flooding IM.
+                max_ts = self._get_max_timestamp()
+                logger.info("OpenCode driver: seeded new session to ts=%d", max_ts)
+                return OutputResult(messages=[], count=0, cursor=max_ts)
             # session unchanged, no need to reassign
         if not self._session_id:
             return OutputResult(messages=[], count=0, cursor=since)
@@ -169,6 +174,21 @@ class OpenCodeTmuxDriver:
         return _OPENCODE_ERROR_PATTERNS
 
     # --- Internal ---
+
+    def _get_max_timestamp(self) -> int:
+        """Get the latest time_created in the current session (for seeding on session change)."""
+        conn = self._get_db()
+        if not conn or not self._session_id:
+            return 0
+        try:
+            cur = conn.execute(
+                "SELECT MAX(time_created) FROM part WHERE session_id = ?",
+                (self._session_id,),
+            )
+            row = cur.fetchone()
+            return row[0] if row and row[0] else 0
+        except sqlite3.Error:
+            return 0
 
     def _get_db(self) -> sqlite3.Connection | None:
         if self._db is not None:
