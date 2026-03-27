@@ -294,13 +294,16 @@ class OutputPoller:
         for i, part in enumerate(parts):
             # Include shard_index in hash to avoid dedup collision when
             # different shards have identical content (Bug #6).
-            # NOTE: offset deliberately excluded — including it caused dedup
-            # bypass after gateway restart (P0 Bug #11).
-            content_hash = hashlib.sha256(
-                f"{backend_id}:{channel_type}:{bot_id}:{chat_id}:{i}:{part}".encode()
-            ).hexdigest()
+            # Include hour bucket so identical content at different times is
+            # not permanently deduped (e.g. agent replies "ok" twice).
+            # Raw offset is NOT included — that caused dedup bypass after
+            # gateway restart (P0 Bug #11).
             msg_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
+            hour_bucket = now[:13]  # "2026-03-27T15" — 1-hour granularity
+            content_hash = hashlib.sha256(
+                f"{backend_id}:{channel_type}:{bot_id}:{chat_id}:{i}:{hour_bucket}:{part}".encode()
+            ).hexdigest()
 
             # E-7: Dedup check — skip if same content already pushed for this backend
             if await self._db.has_content_hash(backend_id, content_hash):
