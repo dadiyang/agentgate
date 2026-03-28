@@ -162,7 +162,12 @@ async def run(config: GatewayConfig, config_path: Path | None = None) -> None:
 
     # 11. Health prober callbacks
     async def on_recovered(bid: str) -> None:
-        await poller.reset_offset(bid)  # Backend restarted — reset output cursor
+        # Reset output cursor for CC backends (JSONL file replaced on restart).
+        # OC backends use SQLite timestamps that survive restarts — resetting
+        # to 0 replays all history and floods IM.
+        bc = config.backends.get(bid)
+        if bc and getattr(bc, "agent_type", "claude-code") != "opencode":
+            await poller.reset_offset(bid)
         await recovery.on_backend_recovered(bid)
 
     async def on_unhealthy(bid: str) -> None:
