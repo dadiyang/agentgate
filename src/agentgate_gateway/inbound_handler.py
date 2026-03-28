@@ -7,11 +7,13 @@ import uuid
 from datetime import datetime, timezone
 
 import httpx
+from opentelemetry import trace
 
 from agentgate_gateway.db import MessageDB
 from agentgate_gateway.router import Router
 
 logger = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 DELIVERY_TIMEOUT = 30  # seconds
 MAX_RETRY = 3
@@ -58,6 +60,20 @@ class InboundHandler:
         in a background task instead of awaiting it.  Used by the HTTP inject
         endpoint so the caller gets a fast response.
         """
+        with _tracer.start_as_current_span("inbound", attributes={
+            "channel": channel_type, "bot_id": bot_id, "chat_id": chat_id,
+        }):
+            return await self._handle_message_inner(
+                channel_type, bot_id, chat_id, sender_id, sender_name,
+                group_name, text, dedup_key, target_backend_id, message_id,
+                fire_and_forget,
+            )
+
+    async def _handle_message_inner(
+        self, channel_type, bot_id, chat_id, sender_id, sender_name,
+        group_name, text, dedup_key, target_backend_id, message_id,
+        fire_and_forget,
+    ):
         logger.info(
             "Inbound: channel=%s bot=%s chat=%s sender=%s text=%s",
             channel_type, bot_id, chat_id, sender_name, text[:80],

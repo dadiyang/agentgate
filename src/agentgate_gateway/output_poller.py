@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 import httpx
+from opentelemetry import trace
 
 from agentgate_gateway.db import MessageDB
 from agentgate_gateway.formatter import format_for_channel
@@ -14,6 +15,7 @@ from agentgate_gateway.router import Router
 from agentgate_gateway.splitter import split_message
 
 logger = logging.getLogger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 PUSH_MAX_RETRY = 5
 
@@ -153,6 +155,10 @@ class OutputPoller:
         logger.warning("Seed %s failed, will retry next cycle", backend_id)
 
     async def _poll_backend(self, backend_id: str, backend):
+        with _tracer.start_as_current_span(f"poll:{backend_id}"):
+            return await self._poll_backend_inner(backend_id, backend)
+
+    async def _poll_backend_inner(self, backend_id: str, backend):
         url = getattr(backend, "url", None) or (
             backend.get("url", "") if isinstance(backend, dict) else ""
         )
@@ -205,9 +211,10 @@ class OutputPoller:
             await self._set_offset(backend_id, next_offset)
             return
 
+        poll_id = uuid.uuid4().hex[:8]
         logger.info(
-            "Polled %d new messages from backend=%s (offset %d→%d)",
-            msg_count, backend_id, offset, next_offset,
+            "Polled %d new messages from backend=%s poll=%s (offset %d→%d)",
+            msg_count, backend_id, poll_id, offset, next_offset,
         )
         await self._set_offset(backend_id, next_offset)
 
@@ -242,17 +249,17 @@ class OutputPoller:
                 combined = "\n\n".join(texts)
             for channel_type, bot_id, chat_id in bindings:
                 task = asyncio.create_task(
-                    self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined, poll_offset=offset)
+                    self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined, poll_offset=offset, poll_id=poll_id)
                 )
                 self._push_tasks.add(task)
 
-                def _on_push_done(t: asyncio.Task, _bid: str = backend_id) -> None:
+                def _on_push_done(t: asyncio.Task, _bid: str = backend_id, _poll_id: str = poll_id) -> None:
                     self._push_tasks.discard(t)
                     if t.cancelled():
                         return
                     exc = t.exception()
                     if exc:
-                        logger.error("Push task failed for backend=%s: %s", _bid, exc, exc_info=exc)
+                        logger.error("Push task failed for backend=%s poll=%s: %s", _bid, _poll_id, exc, exc_info=exc)
 
                 task.add_done_callback(_on_push_done)
 
@@ -300,7 +307,7 @@ class OutputPoller:
 
     async def _push_to_channel(
         self, backend_id: str, channel_type: str, bot_id: str, chat_id: str, text: str,
-        poll_offset: int = 0,
+        poll_offset: int = 0, poll_id: str = "",
     ):
         # Split raw text FIRST, then format each part for the channel.
         # Formatting (e.g. Feishu JSON) can change size and structure;
@@ -324,8 +331,8 @@ class OutputPoller:
             # E-7: Dedup check — skip if same content already pushed for this backend
             if await self._db.has_content_hash(backend_id, content_hash):
                 logger.info(
-                    "Outbound dedup skip: backend=%s channel=%s:%s chat=%s hash=%s content=%s",
-                    backend_id, channel_type, bot_id, chat_id, content_hash[:16], text[:40],
+                    "Outbound dedup skip: backend=%s poll=%s channel=%s:%s chat=%s hash=%s content=%s",
+                    backend_id, poll_id, channel_type, bot_id, chat_id, content_hash[:16], text[:40],
                 )
                 continue
 
@@ -344,8 +351,8 @@ class OutputPoller:
                 }
             )
             logger.info(
-                "Outbound save: msg_id=%s backend=%s → %s:%s chat=%s len=%d",
-                msg_id, backend_id, channel_type, bot_id, chat_id, len(part),
+                "Outbound save: msg_id=%s backend=%s poll=%s → %s:%s chat=%s len=%d",
+                msg_id, backend_id, poll_id, channel_type, bot_id, chat_id, len(part),
             )
 
             # Push to channel with retry — try channel:bot_id first (multi-bot),

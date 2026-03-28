@@ -19,7 +19,7 @@ from agentgate_gateway.output_poller import OutputPoller
 from agentgate_gateway.recovery import RecoveryManager
 from agentgate_gateway.router import Router
 
-_LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s %(message)s"
+_LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s [%(otelTraceID)s] %(message)s"
 _LOG_DIR = Path.home() / ".agentgate" / "gateway" / "logs"
 _LOG_MAX_BYTES = 100 * 1024 * 1024  # 100MB per file
 _LOG_BACKUP_COUNT = 9  # 10 files × 100MB = 1GB total
@@ -47,6 +47,16 @@ def _setup_logging() -> None:
 
 
 _setup_logging()
+
+# Initialize OpenTelemetry: trace_id injection into logs + httpx auto-propagation.
+# No external collector — traces exist only for log correlation and cross-service
+# context propagation (gateway ↔ backend HTTP calls share the same trace).
+try:
+    from haloant_kit.otel import setup_otel
+    setup_otel("agentgate-gateway")
+except Exception as _e:
+    logging.getLogger(__name__).warning("OTel init failed (non-critical): %s", _e)
+
 # Suppress httpx INFO logs (polling noise: ~95% of log volume).
 # Errors/warnings still logged.
 logging.getLogger("httpx").setLevel(logging.WARNING)

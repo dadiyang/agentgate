@@ -11,8 +11,15 @@ from agentgate_backend.config import BackendConfig, init_config
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    format="%(asctime)s [%(name)s] %(levelname)s [%(otelTraceID)s] %(message)s",
 )
+
+try:
+    from haloant_kit.otel import setup_otel
+    setup_otel("agentgate-backend")
+except Exception as _e:
+    logging.getLogger(__name__).warning("OTel init failed (non-critical): %s", _e)
+
 logger = logging.getLogger("agentgate-backend")
 
 
