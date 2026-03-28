@@ -137,24 +137,52 @@ class OpenCodeTmuxDriver:
 
         messages = []
         max_ts = since
+        _user_skipped = 0
+        _none_converted = 0
 
         for time_created, part_data_str, msg_data_str in rows:
-            if time_created > max_ts:
-                max_ts = time_created
             try:
                 part = json.loads(part_data_str)
                 msg_meta = json.loads(msg_data_str)
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning("OC read_output: bad part data at ts=%d: %s", time_created, e)
+                if time_created > max_ts:
+                    max_ts = time_created
                 continue
-            # Only emit assistant messages. User messages from SQLite include
-            # startup/recovery commands (e.g. "opencode -m ... --session ...")
-            # that pollute IM output as noise.
+
+            # Only emit assistant messages.
             if msg_meta.get("role") == "user":
+                _user_skipped += 1
+                if time_created > max_ts:
+                    max_ts = time_created
                 continue
+
             converted = _convert_part(part, msg_meta.get("role", "assistant"))
             if converted:
                 messages.append(converted)
+                if time_created > max_ts:
+                    max_ts = time_created
+            else:
+                _none_converted += 1
+                # Don't advance cursor past empty text parts — OC writes empty
+                # text placeholders first, then updates with real content.
+                # If we advance past them, the real content is never seen.
+                pt = part.get("type", "?")
+                if pt == "text" and not part.get("text"):
+                    logger.debug("OC read_output: skipping empty text part at ts=%d (not advancing cursor)", time_created)
+                    # Do NOT update max_ts — leave cursor behind this part
+                    # so next poll re-reads it after OC fills in the content.
+                else:
+                    if time_created > max_ts:
+                        max_ts = time_created
+
+        # Diagnostic: log every non-trivial read for pipeline tracing
+        if rows:
+            logger.info(
+                "OC read_output: session=%s since=%d → %d rows, %d user-skip, %d none-convert, %d returned, cursor=%d",
+                self._session_id[:16] if self._session_id else "?",
+                since, len(rows), _user_skipped, _none_converted, len(messages), max_ts,
+            )
 
         if messages:
             logger.info(
