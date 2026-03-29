@@ -9,10 +9,17 @@ import click
 
 from agentgate_backend.config import BackendConfig, init_config
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s [%(otelTraceID)s] %(message)s",
-)
+class _SafeOTelFormatter(logging.Formatter):
+    """Formatter that injects default otelTraceID when no span is active."""
+    def format(self, record):
+        if not hasattr(record, "otelTraceID"):
+            record.otelTraceID = "0" * 32
+        return super().format(record)
+
+_fmt = _SafeOTelFormatter("%(asctime)s [%(name)s] %(levelname)s [%(otelTraceID)s] %(message)s")
+_handler = logging.StreamHandler()
+_handler.setFormatter(_fmt)
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 
 try:
     from haloant_kit.otel import setup_otel

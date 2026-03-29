@@ -25,12 +25,20 @@ _LOG_MAX_BYTES = 100 * 1024 * 1024  # 100MB per file
 _LOG_BACKUP_COUNT = 9  # 10 files × 100MB = 1GB total
 
 
+class _SafeOTelFormatter(logging.Formatter):
+    """Formatter that injects default otelTraceID when no span is active."""
+    def format(self, record):
+        if not hasattr(record, "otelTraceID"):
+            record.otelTraceID = "0" * 32
+        return super().format(record)
+
+
 def _setup_logging() -> None:
     """Configure logging with console + rotating file output (1GB cap)."""
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    fmt = logging.Formatter(_LOG_FORMAT)
+    fmt = _SafeOTelFormatter(_LOG_FORMAT)
     # Console
     console = logging.StreamHandler()
     console.setFormatter(fmt)
