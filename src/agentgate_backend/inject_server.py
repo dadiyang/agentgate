@@ -250,7 +250,8 @@ def create_app(
         if session and session.file_path:
             try:
                 next_offset = Path(session.file_path).stat().st_size
-            except OSError:
+            except OSError as e:
+                logger.warning("output_handler: stat failed for session file: %s", e)
                 pass
 
         return web.json_response({
@@ -276,6 +277,7 @@ def create_app(
         try:
             body = await request.json()
         except Exception:
+            logger.warning("window_create_handler: invalid JSON body from %s", request.remote, exc_info=True)
             return web.json_response(
                 {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
                 status=400,
@@ -335,6 +337,7 @@ def create_app(
         try:
             body = await request.json()
         except Exception:
+            logger.warning("confirm_processed_handler: invalid JSON body from %s", request.remote, exc_info=True)
             return web.json_response(
                 {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
                 status=400,
@@ -470,6 +473,7 @@ def create_opencode_app(
         try:
             body = await request.json()
         except Exception:
+            logger.warning("opencode inject_handler: invalid JSON body from %s", request.remote, exc_info=True)
             return web.json_response(
                 {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
                 status=400,
@@ -588,6 +592,7 @@ def create_driver_app(
         try:
             body = await request.json()
         except Exception:
+            logger.warning("driver inject_handler: invalid JSON body from %s", request.remote, exc_info=True)
             return web.json_response(
                 {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
                 status=400,

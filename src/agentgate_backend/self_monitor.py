@@ -208,7 +208,8 @@ class SelfMonitor:
                     sid = info.get("session_id", "")
                     return sid if sid else None
             return None
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("SelfMonitor: failed to read session map for window '%s': %s", window_name, e)
             return None
 
     def _get_session_id_by_window_id(self, window_id: str) -> str | None:
@@ -226,7 +227,8 @@ class SelfMonitor:
             info = data.get(key, {})
             sid = info.get("session_id", "")
             return sid if sid else None
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("SelfMonitor: failed to read session map for window_id '%s': %s", window_id, e)
             return None
 
     def _build_restart_command(self, window_id: str, window_name: str) -> str:

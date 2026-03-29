@@ -287,6 +287,7 @@ async def handle_inject(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except Exception:
+        logger.warning("handle_inject: invalid JSON body from %s", request.remote, exc_info=True)
         return web.json_response(
             {"ok": False, "error": "bad_request", "msg": "Invalid JSON body"},
             status=400,
@@ -332,6 +333,7 @@ async def handle_confirm_processed(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except Exception:
+        logger.warning("handle_confirm_processed: invalid JSON body from %s", request.remote, exc_info=True)
         return web.json_response(
             {"ok": False, "error": "bad_request", "msg": "Invalid JSON body"},
             status=400,

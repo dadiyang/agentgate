@@ -86,7 +86,8 @@ class ClaudeCodeDriver:
         if session and session.file_path:
             try:
                 next_offset = Path(session.file_path).stat().st_size
-            except OSError:
+            except OSError as e:
+                logger.warning("CC driver: could not stat session file for cursor: %s", e)
                 pass
         return OutputResult(messages=messages, count=count, cursor=next_offset)
 
@@ -112,5 +113,6 @@ class ClaudeCodeDriver:
             info = data.get(key, {})
             sid = info.get("session_id", "")
             return sid if sid else None
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("CC driver: failed to read session map for window %s: %s", window_id, e)
             return None

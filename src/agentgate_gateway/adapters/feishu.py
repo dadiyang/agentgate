@@ -206,7 +206,8 @@ class FeishuAdapter(ChannelAdapter):
         finally:
             try:
                 new_loop.close()
-            except Exception:
+            except Exception as e:
+                logger.warning("Feishu [%s]: failed to close WS event loop: %s", self._app_id, e)
                 pass
 
     def _force_close_ws(self):
@@ -222,7 +223,8 @@ class FeishuAdapter(ChannelAdapter):
             async def _close():
                 try:
                     await conn.close()
-                except Exception:
+                except Exception as e:
+                    logger.warning("Feishu [%s]: error during forced WS close: %s", self._app_id, e)
                     pass
             asyncio.run_coroutine_threadsafe(_close(), ws_loop)
 
@@ -312,7 +314,8 @@ class FeishuAdapter(ChannelAdapter):
             parsed = json.loads(text)
             if isinstance(parsed, dict) and "zh_cn" in parsed:
                 is_post = True
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Feishu [%s]: failed to parse message as post JSON: %s", self._app_id, e)
             pass
 
         if is_post:

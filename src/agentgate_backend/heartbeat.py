@@ -44,7 +44,8 @@ def write_heartbeat(
         if tmp_path:
             try:
                 os.unlink(tmp_path)
-            except OSError:
+            except OSError as e:
+                logger.warning("heartbeat: failed to remove temp file %s: %s", tmp_path, e)
                 pass
 
 

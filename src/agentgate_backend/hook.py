@@ -39,7 +39,8 @@ def main() -> None:
 
     try:
         event = json.loads(sys.argv[1])
-    except (json.JSONDecodeError, IndexError):
+    except (json.JSONDecodeError, IndexError) as e:
+        logger.warning("hook: failed to parse event argument: %s", e)
         return
 
     session_id = event.get("session_id")

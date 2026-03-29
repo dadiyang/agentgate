@@ -327,7 +327,8 @@ class SessionManager:
             async with aiofiles.open(config.session_map_file, "r") as f:
                 content = await f.read()
             session_map = json.loads(content)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("load_session_map: failed to read session map file: %s", e)
             return
 
         prefix = f"{config.tmux_session_name}:"
@@ -455,9 +456,11 @@ class SessionManager:
                             parsed = TranscriptParser.parse_message(data)
                             if parsed and parsed.text.strip():
                                 last_user_msg = parsed.text.strip()
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
+                        logger.warning("_get_session_direct: JSON parse error in %s: %s", file_path, e)
                         continue
-        except OSError:
+        except OSError as e:
+            logger.warning("_get_session_direct: could not read session file %s: %s", file_path, e)
             return None
 
         if not summary:
@@ -536,7 +539,8 @@ class SessionManager:
 
         try:
             file_size = file_path.stat().st_size
-        except OSError:
+        except OSError as e:
+            logger.warning("get_unread_info: could not stat session file %s: %s", file_path, e)
             return None
 
         user_offset = self.get_user_window_offset(user_id, window_id)

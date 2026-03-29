@@ -114,7 +114,8 @@ class SessionMonitor:
         for w in windows:
             try:
                 cwds.add(str(Path(w.cwd).resolve()))
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                logger.warning("SessionMonitor: could not resolve cwd '%s': %s", w.cwd, e)
                 cwds.add(w.cwd)
         return cwds
 
@@ -155,7 +156,8 @@ class SessionMonitor:
 
                         try:
                             norm_pp = str(Path(project_path).resolve())
-                        except (OSError, ValueError):
+                        except (OSError, ValueError) as e:
+                            logger.warning("SessionMonitor: could not resolve project path '%s': %s", project_path, e)
                             norm_pp = project_path
                         if norm_pp not in active_cwds:
                             continue
@@ -308,7 +310,8 @@ class SessionMonitor:
                 # Check mtime to see if file has changed
                 try:
                     current_mtime = session_info.file_path.stat().st_mtime
-                except OSError:
+                except OSError as e:
+                    logger.warning("SessionMonitor: could not stat session file %s: %s", session_info.file_path, e)
                     continue
 
                 last_mtime = self._file_mtimes.get(session_info.session_id, 0.0)
@@ -386,7 +389,8 @@ class SessionMonitor:
                     session_id = info.get("session_id", "")
                     if session_id:
                         window_to_session[window_key] = session_id
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("SessionMonitor: failed to read session map file: %s", e)
                 pass
         return window_to_session
 

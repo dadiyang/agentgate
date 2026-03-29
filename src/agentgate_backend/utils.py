@@ -7,10 +7,13 @@ Provides:
 """
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 AGENTGATE_DIR_ENV = "AGENTGATE_DIR"
 
@@ -44,7 +47,8 @@ def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
     except BaseException:
         try:
             os.unlink(tmp_path)
-        except OSError:
+        except OSError as e:
+            logger.warning("atomic_write_json: failed to remove temp file %s: %s", tmp_path, e)
             pass
         raise
 
@@ -65,8 +69,10 @@ def read_cwd_from_jsonl(file_path: str | Path) -> str:
                     cwd = data.get("cwd")
                     if cwd:
                         return cwd
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    logger.warning("read_cwd_from_jsonl: JSON parse error in %s: %s", file_path, e)
                     continue
-    except OSError:
+    except OSError as e:
+        logger.warning("read_cwd_from_jsonl: could not open %s: %s", file_path, e)
         pass
     return ""

@@ -193,7 +193,8 @@ class ClaudeCodeSubprocessDriver:
                     continue
                 try:
                     event = json.loads(line)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    logger.warning("CC subprocess: JSON parse error on stdout line: %s | line=%r", e, line[:200])
                     continue
                 self._handle_event(event)
         except Exception as e:

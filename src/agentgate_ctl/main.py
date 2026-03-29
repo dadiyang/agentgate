@@ -1,11 +1,14 @@
 """agentgate-ctl: management CLI for AgentGate backend instances."""
 
 import json
+import logging
 import secrets
 import socket
 import subprocess
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import click
 import yaml
@@ -42,7 +45,8 @@ def _allocated_ports(config: dict) -> set[int]:
         try:
             port = int(url.rsplit(":", 1)[-1])
             ports.add(port)
-        except (ValueError, IndexError):
+        except (ValueError, IndexError) as e:
+            logger.debug("_allocated_ports: could not parse port from url=%r: %s", url, e)
             pass
     # Also check .env files for ports not yet in gateway config
     if BACKENDS_DIR.exists():
@@ -51,7 +55,8 @@ def _allocated_ports(config: dict) -> set[int]:
                 if line.startswith("AGENTGATE_PORT="):
                     try:
                         ports.add(int(line.split("=", 1)[1]))
-                    except ValueError:
+                    except ValueError as e:
+                        logger.debug("_allocated_ports: could not parse AGENTGATE_PORT in %s: %s", env_file, e)
                         pass
     return ports
 
@@ -126,7 +131,8 @@ def _heartbeat_info(name: str) -> dict | None:
         return None
     try:
         return json.loads(hb_file.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("_heartbeat_info: failed to read heartbeat file %s: %s", hb_file, e)
         return None
 
 
@@ -445,7 +451,8 @@ def remove(name, yes):
             conn.commit()
             conn.close()
             click.echo(f"  Cleaned poll_offsets for '{name}'")
-        except Exception:
+        except Exception as e:
+            logger.warning("Table may not exist yet: %s", e)
             pass  # Table may not exist yet
 
     click.echo(f"\n✓ Instance '{name}' removed.")

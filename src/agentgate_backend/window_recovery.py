@@ -63,7 +63,8 @@ class WindowRecovery:
             info = data.get(key, {})
             sid = info.get("session_id", "")
             return sid if sid else None
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("WindowRecovery: failed to read session map for window_id '%s': %s", window_id, e)
             return None
 
     def _build_recovery_command(self, window_id: str) -> str:

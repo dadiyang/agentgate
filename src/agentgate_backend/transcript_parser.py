@@ -17,9 +17,12 @@ Key classes: TranscriptParser (static methods), ParsedEntry, ParsedMessage, Pend
 
 import difflib
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,7 +92,8 @@ class TranscriptParser:
 
         try:
             return json.loads(line)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.warning("TranscriptParser.parse_line: JSON parse error: %s | line=%r", e, line[:200])
             return None
 
     @staticmethod

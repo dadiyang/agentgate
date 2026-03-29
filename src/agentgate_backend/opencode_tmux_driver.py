@@ -106,10 +106,12 @@ class OpenCodeTmuxDriver:
                 return OutputResult(messages=[], count=0, cursor=max_ts)
             # session unchanged, no need to reassign
         if not self._session_id:
+            logger.warning("OC read_output: no session_id found, returning empty")
             return OutputResult(messages=[], count=0, cursor=since)
 
         conn = self._get_db()
         if conn is None:
+            logger.warning("OC read_output: cannot open DB at %s", self._db_path)
             return OutputResult(messages=[], count=0, cursor=since)
 
         try:
@@ -130,7 +132,8 @@ class OpenCodeTmuxDriver:
             if self._db:
                 try:
                     self._db.close()
-                except Exception:
+                except Exception as _close_err:
+                    logger.warning("OpenCode driver: DB close failed during reset: %s", _close_err)
                     pass
                 self._db = None
             return OutputResult(messages=[], count=0, cursor=since)
@@ -217,7 +220,8 @@ class OpenCodeTmuxDriver:
             )
             row = cur.fetchone()
             return row[0] if row and row[0] else 0
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            logger.warning("OpenCode driver: failed to get max timestamp for session %s: %s", self._session_id, e)
             return 0
 
     def _get_db(self) -> sqlite3.Connection | None:

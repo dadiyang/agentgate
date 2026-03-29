@@ -5,8 +5,11 @@ this module to classify undelivered events and generate catch-up summaries.
 """
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,7 +59,8 @@ def _extract_hhmm(wall_time: str) -> str:
     try:
         t_idx = wall_time.index("T")
         return wall_time[t_idx + 1 : t_idx + 6]  # "HH:MM"
-    except (ValueError, IndexError):
+    except (ValueError, IndexError) as e:
+        logger.debug("_extract_hhmm: could not parse time from %r: %s", wall_time, e)
         return "??:??"
 
 

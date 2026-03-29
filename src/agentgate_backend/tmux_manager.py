@@ -98,7 +98,8 @@ class TmuxManager:
         """Get the tmux session if it exists."""
         try:
             return self.server.sessions.get(session_name=self.session_name)
-        except Exception:
+        except Exception as e:
+            logger.error("TmuxManager: failed to get session '%s': %s", self.session_name, e, exc_info=True)
             return None
 
     def get_or_create_session(self) -> libtmux.Session:

@@ -56,6 +56,7 @@ class GatewayAPI:
         try:
             body = await request.json()
         except Exception:
+            logger.warning("handle_http_inject: invalid JSON body from %s", request.remote, exc_info=True)
             return _json({"ok": False, "error": "bad_request", "msg": "Invalid JSON body"}, 400)
 
         backend_id = body.get("backend_id", "").strip()
@@ -163,12 +164,14 @@ class GatewayAPI:
 
         try:
             pending_inbound = len(await self._db.get_pending("inbound"))
-        except Exception:
+        except Exception as e:
+            logger.warning("handle_health: failed to query pending_inbound: %s", e)
             pending_inbound = 0
 
         try:
             pending_outbound = len(await self._db.get_pending("outbound"))
-        except Exception:
+        except Exception as e:
+            logger.warning("handle_health: failed to query pending_outbound: %s", e)
             pending_outbound = 0
 
         return _json(
@@ -191,6 +194,7 @@ class GatewayAPI:
         try:
             filters = await request.json()
         except Exception:
+            logger.warning("handle_messages_query: invalid JSON body from %s", request.remote, exc_info=True)
             return _json({"ok": False, "error": "bad_request", "msg": "Invalid JSON body"}, 400)
 
         try:
