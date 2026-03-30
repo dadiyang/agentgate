@@ -17,7 +17,6 @@ from agentgate_gateway.splitter import split_message
 logger = logging.getLogger(__name__)
 _tracer = trace.get_tracer(__name__)
 
-PUSH_MAX_RETRY = 5
 
 # Context compression summary prefix — replace with short notice for IM push
 _CONTEXT_SUMMARY_PREFIX = "This session is being continued from a previous conversation"
@@ -43,7 +42,8 @@ def _group_by_role(messages: list[dict]) -> list[tuple[str, list[str]]]:
     return groups
 
 
-PUSH_RETRY_DELAYS = [2, 4, 8, 16, 30]  # exponential backoff seconds
+PUSH_MAX_RETRY = 10
+PUSH_RETRY_DELAYS = [2, 5, 10, 20, 30, 60, 60, 120, 120, 180]  # ~10 min total
 
 
 class OutputPoller:
