@@ -460,5 +460,140 @@ def remove(name, yes):
                 "Delete manually if no longer needed.")
 
 
+def _gateway_url() -> str:
+    """Get the gateway URL from config (for send/health commands)."""
+    config = _load_gateway_config()
+    # Check if gateway has a port configured
+    port = config.get("port", 8800)
+    return f"http://127.0.0.1:{port}"
+
+
+def _gateway_health(gateway_url: str) -> dict | None:
+    """Fetch gateway /api/health."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(gateway_url.rstrip("/") + "/api/health")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+def _send_via_gateway(gateway_url: str, backend_id: str, text: str, sender: str = "") -> dict:
+    """Send a message to a backend via gateway HTTP inject API."""
+    import urllib.request
+    api_url = gateway_url.rstrip("/") + "/api/channel/inject"
+    payload = json.dumps({
+        "backend_id": backend_id,
+        "text": text,
+        "sender_name": sender or "agentgate-ctl",
+    }).encode()
+    req = urllib.request.Request(
+        api_url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        return {"ok": False, "error": f"HTTP {e.code}", "detail": body}
+    except urllib.error.URLError as e:
+        return {"ok": False, "error": str(e.reason)}
+
+
+@cli.command("send")
+@click.argument("target", required=False)
+@click.argument("message", required=False)
+@click.option("--from", "sender", default="", help="Sender name for message envelope")
+@click.option("--list", "list_targets", is_flag=True, help="List all available targets")
+@click.option("--status", "show_status", is_flag=True, help="Show health status of all backends")
+def send(target, message, sender, list_targets, show_status):
+    """Send a message to an agent backend.
+
+    \b
+    Examples:
+      agentgate-ctl send my-agent "hello"
+      agentgate-ctl send my-agent -            # read from stdin
+      agentgate-ctl send --list                # list targets
+      agentgate-ctl send --status              # health overview
+      echo "long text" | agentgate-ctl send my-agent -
+    """
+    gateway_url = _gateway_url()
+
+    if list_targets:
+        config = _load_gateway_config()
+        backends = config.get("backends", {})
+        if not backends:
+            click.echo("No backends configured.")
+            return
+        click.echo(f"Gateway: {gateway_url}")
+        click.echo(f"{'BACKEND':<25} {'URL':<30} {'TYPE'}")
+        click.echo("-" * 70)
+        for bid, bc in sorted(backends.items()):
+            url = bc.get("url", "?")
+            agent_type = bc.get("agent_type", "claude-code")
+            click.echo(f"{bid:<25} {url:<30} {agent_type}")
+        return
+
+    if show_status:
+        health = _gateway_health(gateway_url)
+        if not health:
+            click.echo(f"Gateway ({gateway_url}) unreachable", err=True)
+            sys.exit(1)
+        backends = health.get("backends", {})
+        if not backends:
+            click.echo("No backends.")
+            return
+        click.echo(f"{'BACKEND':<25} {'STATUS':<12} {'LAST CHECK'}")
+        click.echo("-" * 60)
+        for bid in sorted(backends):
+            info = backends[bid]
+            status = info.get("status", "unknown")
+            last_check = info.get("last_check", "?")
+            if last_check and len(last_check) > 19:
+                last_check = last_check[:19]
+            marker = "✓" if status == "healthy" else "✗"
+            click.echo(f"{bid:<25} {marker} {status:<10} {last_check}")
+        return
+
+    if not target:
+        click.echo("Error: target backend_id required. Use --list to see available targets.", err=True)
+        sys.exit(1)
+
+    # Validate target exists
+    config = _load_gateway_config()
+    if target not in config.get("backends", {}):
+        click.echo(f"Error: backend '{target}' not found in gateway config.", err=True)
+        click.echo(f"Available: {', '.join(sorted(config.get('backends', {})))}", err=True)
+        sys.exit(1)
+
+    # Read message
+    if message is None:
+        click.echo("Error: message required. Use '-' to read from stdin.", err=True)
+        sys.exit(1)
+    if message == "-":
+        message = sys.stdin.read().strip()
+        if not message:
+            click.echo("Error: empty stdin.", err=True)
+            sys.exit(1)
+
+    # Send
+    result = _send_via_gateway(gateway_url, target, message, sender)
+
+    if result.get("ok"):
+        msg_id = result.get("message_id") or result.get("msg_id") or "?"
+        click.echo(f"OK → {target} (msg_id={msg_id})")
+    else:
+        error = result.get("error", "unknown")
+        detail = result.get("detail", result.get("msg", ""))
+        click.echo(f"FAIL → {target}: {error}", err=True)
+        if detail:
+            click.echo(f"  {detail[:200]}", err=True)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()
