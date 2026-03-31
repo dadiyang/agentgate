@@ -26,7 +26,7 @@ class BackendConfig(BaseSettings):
     tmux_main_window_name: str = "__main__"
     initial_window_name: str = ""  # Default: work_dir basename
     claude_command: str = "claude"
-    process_name: str = "claude"
+    process_name: str = ""  # Auto-derived from agent_type if not set
     opencode_model: str = ""  # Model for opencode agent (e.g. "dashscope/qwen-plus")
 
     # SelfMonitor
@@ -78,9 +78,17 @@ class BackendConfig(BaseSettings):
 config: BackendConfig = BackendConfig()
 
 
+_PROCESS_NAME_DEFAULTS = {
+    "claude-code": "claude",
+    "opencode": "node",
+}
+
+
 def init_config(**kwargs) -> BackendConfig:
     """Initialize the global config. Called once at startup."""
     global config
     config = BackendConfig(**kwargs)
+    if not config.process_name:
+        config.process_name = _PROCESS_NAME_DEFAULTS.get(config.agent_type, "claude")
     config.instance_dir.mkdir(parents=True, exist_ok=True)
     return config

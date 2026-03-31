@@ -198,14 +198,8 @@ class OpenCodeTmuxDriver:
 
     @property
     def process_name(self) -> str:
-        # Prefer AGENTGATE_PROCESS_NAME from config — allows users to override
-        # for native-compiled opencode binaries (pane_current_command = "opencode")
-        # vs npm-installed (pane_current_command = "node").
         from .config import config as _backend_config
-        configured = _backend_config.process_name
-        if configured and configured != "claude":
-            return configured
-        return "node"
+        return _backend_config.process_name
 
     @property
     def error_patterns(self) -> list[tuple[str, str]]:
