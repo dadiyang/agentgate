@@ -63,6 +63,24 @@ Key settings:
 | `AGENTGATE_WORK_DIR` | Agent's working directory |
 | `AGENTGATE_AGENT_TYPE` | `claude-code` or `opencode` |
 | `AGENTGATE_AGENT_MODE` | `tmux` (persistent session) or `subprocess` (stdin/stdout) |
+| `AGENTGATE_PROCESS_NAME` | Process name for health detection (see below) |
+
+**`AGENTGATE_PROCESS_NAME`** controls how SelfMonitor detects whether the agent is alive. It must match what `tmux` reports as the foreground process in the pane (`pane_current_command`). If it doesn't match, SelfMonitor will think the agent is dead and keep restarting it.
+
+Defaults by agent type (auto-derived, usually no need to set):
+
+| Agent type | Default | Why |
+|------------|---------|-----|
+| `claude-code` | `claude` | Claude Code binary |
+| `opencode` | `node` | npm-installed OpenCode runs as a Node.js process |
+
+Override when needed — e.g. native-compiled OpenCode binary shows `opencode` in tmux, not `node`:
+
+```bash
+AGENTGATE_PROCESS_NAME=opencode
+```
+
+To check what tmux actually reports: `tmux list-windows -F '#{window_name} #{pane_current_command}'`
 
 For OpenCode with a local model:
 
@@ -70,7 +88,7 @@ For OpenCode with a local model:
 AGENTGATE_AGENT_TYPE=opencode
 AGENTGATE_AGENT_MODE=tmux
 AGENTGATE_OPENCODE_MODEL=local/Qwen3-32B
-AGENTGATE_PROCESS_NAME=node
+# AGENTGATE_PROCESS_NAME=node  (default for opencode, override to "opencode" for native binary)
 ```
 
 OpenCode instances get automatic permission configuration — all tools allowed, interactive prompts disabled (they can't be answered via IM).

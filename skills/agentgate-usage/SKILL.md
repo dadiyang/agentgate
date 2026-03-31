@@ -37,7 +37,9 @@ agentgate-ctl send --status                   # 健康概览
 
 `AGENTGATE_NAME`、`AGENTGATE_PORT`（= `HTTP_PORT`，必须一致）、`AGENTGATE_API_TOKEN`、`AGENTGATE_WORK_DIR`、`AGENTGATE_TMUX_SESSION_NAME`（= `agentgate-<name>`）
 
-可选：`AGENTGATE_AGENT_TYPE`（claude-code|opencode）、`AGENTGATE_AGENT_MODE`（tmux|subprocess）、`AGENTGATE_OPENCODE_MODEL`、`AGENTGATE_PROCESS_NAME`（CC=claude, OC=node）
+可选：`AGENTGATE_AGENT_TYPE`（claude-code|opencode）、`AGENTGATE_AGENT_MODE`（tmux|subprocess）、`AGENTGATE_OPENCODE_MODEL`、`AGENTGATE_PROCESS_NAME`（见下）
+
+**`AGENTGATE_PROCESS_NAME`**：SelfMonitor 用此值判断 agent 是否存活，必须匹配 tmux 报告的前台进程名（`pane_current_command`）。不匹配会导致误判死亡并反复重启。按 agent_type 自动推导默认值（CC=`claude`，OC=`node`），通常不需要手动设。原生编译的 OpenCode 二进制需要覆盖为 `opencode`。验证命令：`tmux list-windows -F '#{window_name} #{pane_current_command}'`
 
 ### gateway config（`~/.agentgate/gateway/config.yaml`）
 
@@ -60,7 +62,7 @@ routes:
 
 详细配置见 [references/opencode-local-model.md](references/opencode-local-model.md)。
 
-要点：全局 `~/.config/opencode/opencode.json` 加 provider，`limit.context` = ctx-size/parallel，`.env` 设 `AGENT_TYPE=opencode` + `PROCESS_NAME=node`。AgentGate 自动 patch `question=deny`。
+要点：全局 `~/.config/opencode/opencode.json` 加 provider，`limit.context` = ctx-size/parallel，`.env` 设 `AGENT_TYPE=opencode`。`PROCESS_NAME` 默认 `node`（npm 安装），原生二进制需覆盖为 `opencode`。AgentGate 自动 patch `question=deny`。
 
 ## 消息丢失排查
 
