@@ -58,6 +58,25 @@ routes:
 
 热加载：`kill -HUP $(pidof agentgate-gateway)` 或 `POST /api/admin/reload`
 
+## 启动后验证（连 IM 前必做）
+
+配置错误会导致 token 浪费（每条消息触发无效处理）或重启风暴（SelfMonitor 误判死亡）。**先验证再接入 IM 流量。**
+
+```bash
+# 1. health API
+curl http://127.0.0.1:<PORT>/api/health -H "Authorization: Bearer <TOKEN>"
+
+# 2. 进程名匹配检查（tmux 模式）
+tmux list-windows -t agentgate-<name> -F '#{window_name} #{pane_current_command}'
+# 正确：pane_current_command 与 PROCESS_NAME 配置一致（CC=claude, OC npm=node, OC native=opencode）
+# 错误：显示 bash（agent 没启动）或名字不匹配（SelfMonitor 会反复重启）
+
+# 3. gateway 健康
+curl http://127.0.0.1:8800/api/health
+```
+
+**发现问题 → 先停 backend 再修**：`systemctl stop agentgate-backend@<name>`。不停就修 = IM 消息持续进来持续消耗 token。
+
 ## OpenCode + 本地模型
 
 详细配置见 [references/opencode-local-model.md](references/opencode-local-model.md)。

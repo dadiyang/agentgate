@@ -145,17 +145,44 @@ sudo systemctl enable --now agentgate-backend@my-agent
 sudo systemctl enable --now agentgate-gateway
 ```
 
-### 4. Verify
+### 4. Verify before connecting IM
+
+**Do this before sending any real messages.** A misconfigured backend will consume tokens on every incoming message or trigger restart loops. Fix problems while the gateway is not routing messages to it.
 
 ```bash
-# Check backend health
+# Step 1: Check backend health API
 curl http://127.0.0.1:8903/api/health -H "Authorization: Bearer my-secret-token"
 
-# Check gateway health
+# Step 2: Check agent process name matches config
+tmux list-windows -t agentgate-my-agent -F '#{window_name} #{pane_current_command}'
+# Expected output example:
+#   __main__ claude        ← Claude Code backend
+#   __main__ node          ← OpenCode (npm install)
+#   __main__ opencode      ← OpenCode (native binary)
+# If pane_current_command doesn't match AGENTGATE_PROCESS_NAME,
+# SelfMonitor will think the agent is dead and keep restarting it.
+
+# Step 3: Check gateway health and route config
 curl http://127.0.0.1:8800/api/health
 ```
 
-Send a message in your Telegram chat. The agent gets it, works on it, and the reply shows up in the same chat.
+**What "correct" looks like:**
+- Health API returns `200` with agent status `ok`
+- `pane_current_command` matches `AGENTGATE_PROCESS_NAME` (or the auto-derived default)
+- Gateway shows the backend as `healthy`
+
+**If something is wrong — stop the backend first, then fix:**
+
+```bash
+# Stop backend immediately to prevent token waste from restart loops or IM messages
+sudo systemctl stop agentgate-backend@my-agent
+# Or: kill the agentgate-backend process manually
+
+# Fix .env / gateway config / tmux session as needed, then restart
+sudo systemctl start agentgate-backend@my-agent
+```
+
+Only after all checks pass, send a test message in your IM chat to confirm end-to-end delivery.
 
 ### HTTP-only mode (no IM needed)
 
