@@ -305,22 +305,137 @@ The two layers talk over HTTP. Same machine or different machines, your call.
 
 ---
 
+## CLI management (agentgate-ctl)
+
+### Instance lifecycle
+
+```bash
+# Create a new backend instance (auto-allocates port, generates token)
+agentgate-ctl create my-agent --work-dir ~/my-project --channel telegram --chat-id "7003732745"
+
+# List all instances
+agentgate-ctl list
+
+# Instance status / start / stop / restart / remove
+agentgate-ctl status my-agent
+agentgate-ctl stop my-agent
+agentgate-ctl start my-agent
+agentgate-ctl restart my-agent
+agentgate-ctl remove my-agent
+```
+
+### Messaging between agents
+
+```bash
+# Send a message to any backend by ID
+agentgate-ctl send my-agent "refactor the auth module"
+
+# Read message from stdin (for long content)
+echo "detailed instructions..." | agentgate-ctl send my-agent -
+
+# List all available backends
+agentgate-ctl send --list
+
+# Health overview of all backends
+agentgate-ctl send --status
+
+# With sender name (for message envelope)
+agentgate-ctl send --from dev my-qa-agent "please verify the fix"
+```
+
+---
+
+## OpenCode + local model setup
+
+Run OpenCode with a local model (e.g. Qwen3.5 via llama-server) as an agentgate backend:
+
+### 1. Start llama-server
+
+```bash
+llama-server -m Qwen3.5-35B-A3B.gguf --port 18090 --ctx-size 262144 --parallel 2
+```
+
+### 2. Configure OpenCode provider
+
+Add the local provider to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local llama-server",
+      "options": {
+        "baseURL": "http://127.0.0.1:18090/v1",
+        "apiKey": "dummy"
+      },
+      "models": {
+        "Qwen3.5-35B": {
+          "name": "Qwen3.5-35B",
+          "attachments": false,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Set `limit.context` to your llama-server's `ctx-size / parallel` (e.g. 262144 / 2 = 131072).
+
+### 3. Create the backend
+
+```bash
+# .env
+AGENTGATE_AGENT_TYPE=opencode
+AGENTGATE_AGENT_MODE=tmux
+AGENTGATE_OPENCODE_MODEL=local/Qwen3.5-35B
+AGENTGATE_PROCESS_NAME=node
+```
+
+Or via CLI:
+
+```bash
+agentgate-ctl create local-llm --work-dir ~/my-workspace
+# Then edit ~/.agentgate/backends/local-llm/.env to set agent_type/mode/model
+```
+
+AgentGate automatically configures OpenCode permissions for managed instances — all tools allowed, interactive prompts (AskUser) disabled since they can't be answered via IM.
+
+### 4. Project-level model override
+
+Each backend's working directory can have its own `opencode.json` to override the model:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "local/Qwen3.5-35B"
+}
+```
+
+This lets different backends use different models while sharing the global provider config.
+
+---
+
 ## API
 
 ### Gateway
 
 | Method | Path | What it does |
 |--------|------|-------------|
-| GET | `/health` | System status — channels, backends, pending messages |
+| GET | `/api/health` | System status — channels, backends, pending messages |
 | POST | `/api/messages/query` | Query message history with filters |
 | POST | `/api/admin/reload` | Reload config without restart |
-| POST | `/api/inject` | Send a message to a backend (bypasses IM) |
+| POST | `/api/channel/inject` | Send a message to a backend (bypasses IM) |
 
 ### Backend
 
 | Method | Path | What it does |
 |--------|------|-------------|
-| GET | `/health` | Backend and agent health |
+| GET | `/api/health` | Backend and agent health |
 | POST | `/api/inject` | Send message to the agent |
 | GET | `/api/output/{window}?since={offset}` | Read new output since offset |
 
@@ -330,20 +445,27 @@ The two layers talk over HTTP. Same machine or different machines, your call.
 
 ### Agent replies not reaching IM
 
-Check the output pipeline logs:
+Check the output pipeline logs. Every log line includes a trace ID (`[traceID]`) for cross-service correlation:
 
 ```bash
+# By backend ID — see all activity for one agent
 journalctl -u agentgate-gateway --since "10 min ago" | grep "backend=my-agent"
+
+# By trace ID — see the full cross-service journey of one poll cycle
+journalctl -u agentgate-gateway -u agentgate-backend@my-agent | grep "abc123def456"
+
+# By poll ID — see everything in one poll cycle
+journalctl -u agentgate-gateway | grep "poll=e521e8b3"
 ```
 
 A healthy message shows 4 log lines:
 
-1. `Polled N new messages from backend=my-agent` — poller read output from backend
-2. `Outbound save: msg_id=xxx backend=my-agent → telegram:bot chat=xxx` — message persisted
-3. `TG outbound [bot]: chat_id=xxx text=xxx` — push started
+1. `[traceID] Polled N new messages from backend=my-agent poll=xxx` — poller read output
+2. `[traceID] Outbound save: msg_id=xxx backend=my-agent poll=xxx → channel:bot chat=xxx` — persisted
+3. `[traceID] TG outbound [bot]: chat_id=xxx text=xxx` — push started
 4. `TG send ok [bot]: elapsed=xxxms` — push succeeded
 
-Missing step tells you where it broke. Common causes:
+Missing step tells you where it broke:
 
 | Missing | Likely cause |
 |---------|-------------|

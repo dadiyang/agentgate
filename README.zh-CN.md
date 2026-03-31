@@ -304,22 +304,130 @@ curl -X POST http://localhost:8800/api/messages/query \
 
 ---
 
+## CLI 管理工具 (agentgate-ctl)
+
+### 实例生命周期
+
+```bash
+# 创建新实例（自动分配端口、生成 token）
+agentgate-ctl create my-agent --work-dir ~/my-project --channel telegram --chat-id "7003732745"
+
+# 列出所有实例
+agentgate-ctl list
+
+# 状态 / 启动 / 停止 / 重启 / 删除
+agentgate-ctl status my-agent
+agentgate-ctl stop my-agent
+agentgate-ctl start my-agent
+agentgate-ctl restart my-agent
+agentgate-ctl remove my-agent
+```
+
+### Agent 间消息通信
+
+```bash
+# 按 backend_id 发消息
+agentgate-ctl send my-agent "重构 auth 模块"
+
+# 从 stdin 读（适合长内容）
+echo "详细指令..." | agentgate-ctl send my-agent -
+
+# 列出所有可发送的目标
+agentgate-ctl send --list
+
+# 查看所有后端健康状态
+agentgate-ctl send --status
+
+# 带发送者名称
+agentgate-ctl send --from dev my-qa-agent "请验证修复"
+```
+
+---
+
+## OpenCode + 本地模型配置
+
+用 OpenCode + 本地模型（如 Qwen3.5 通过 llama-server）作为 agentgate 后端：
+
+### 1. 启动 llama-server
+
+```bash
+llama-server -m Qwen3.5-35B-A3B.gguf --port 18090 --ctx-size 262144 --parallel 2
+```
+
+### 2. 配置 OpenCode provider
+
+在 `~/.config/opencode/opencode.json` 中添加本地 provider：
+
+```json
+{
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local llama-server",
+      "options": {
+        "baseURL": "http://127.0.0.1:18090/v1",
+        "apiKey": "dummy"
+      },
+      "models": {
+        "Qwen3.5-35B": {
+          "name": "Qwen3.5-35B",
+          "attachments": false,
+          "limit": {
+            "context": 131072,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+`limit.context` 设为 `ctx-size / parallel`（如 262144 / 2 = 131072）。
+
+### 3. 创建后端实例
+
+```bash
+# .env 配置
+AGENTGATE_AGENT_TYPE=opencode
+AGENTGATE_AGENT_MODE=tmux
+AGENTGATE_OPENCODE_MODEL=local/Qwen3.5-35B
+AGENTGATE_PROCESS_NAME=node
+```
+
+AgentGate 自动配置 OpenCode 权限——所有工具允许，交互式提示（AskUser）禁用（无法通过 IM 回答）。
+
+### 4. 项目级模型覆盖
+
+每个后端的工作目录可以放 `opencode.json` 覆盖模型选择：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "local/Qwen3.5-35B"
+}
+```
+
+不同后端可以用不同模型，共享全局 provider 配置。
+
+---
+
 ## API
 
 ### 网关
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/health` | 系统状态——通道、后端、待处理消息 |
+| GET | `/api/health` | 系统状态——通道、后端、待处理消息 |
 | POST | `/api/messages/query` | 按条件查询消息历史 |
 | POST | `/api/admin/reload` | 热加载配置 |
-| POST | `/api/inject` | 直接向后端发消息（绕过 IM） |
+| POST | `/api/channel/inject` | 直接向后端发消息（绕过 IM） |
 
 ### 后端
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/health` | 后端和 Agent 健康状态 |
+| GET | `/api/health` | 后端和 Agent 健康状态 |
 | POST | `/api/inject` | 向 Agent 发消息 |
 | GET | `/api/output/{window}?since={offset}` | 读取 offset 之后的新输出 |
 
@@ -329,17 +437,24 @@ curl -X POST http://localhost:8800/api/messages/query \
 
 ### Agent 回复没到达 IM
 
-查看出站管道日志：
+每条日志都包含 trace ID（`[traceID]`），可跨服务关联：
 
 ```bash
+# 按 backend 查——看某个 agent 的所有活动
 journalctl -u agentgate-gateway --since "10 min ago" | grep "backend=my-agent"
+
+# 按 trace ID 查——看一次 poll 的跨服务完整链路
+journalctl -u agentgate-gateway -u agentgate-backend@my-agent | grep "abc123def456"
+
+# 按 poll ID 查——看一个 poll 周期内的所有操作
+journalctl -u agentgate-gateway | grep "poll=e521e8b3"
 ```
 
 正常消息有 4 行日志：
 
-1. `Polled N new messages from backend=my-agent` — poller 从 backend 读到了输出
-2. `Outbound save: msg_id=xxx backend=my-agent → telegram:bot chat=xxx` — 消息已持久化
-3. `TG outbound [bot]: chat_id=xxx text=xxx` — 开始推送
+1. `[traceID] Polled N new messages from backend=my-agent poll=xxx` — poller 读到了输出
+2. `[traceID] Outbound save: msg_id=xxx backend=my-agent poll=xxx → channel:bot chat=xxx` — 已持久化
+3. `[traceID] TG outbound [bot]: chat_id=xxx text=xxx` — 开始推送
 4. `TG send ok [bot]: elapsed=xxxms` — 推送成功
 
 缺哪一步就是哪里断的：
