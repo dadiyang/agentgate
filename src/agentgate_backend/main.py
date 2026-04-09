@@ -188,13 +188,33 @@ def _create_driver(config: BackendConfig, tmux):
     """Create AgentDriver based on config.agent_type + config.agent_mode.
 
     Matrix:
-      agent_type=claude-code + agent_mode=tmux       → ClaudeCodeDriver (tmux + JSONL)
+      agent_type=claude-code + agent_mode=tmux        → ClaudeCodeTmuxDriver (tmux + JSONL)
       agent_type=claude-code + agent_mode=subprocess  → ClaudeCodeSubprocessDriver (stream-json)
       agent_type=opencode    + agent_mode=tmux        → OpenCodeTmuxDriver (tmux + SQLite)
       agent_type=opencode    + agent_mode=subprocess  → OpenCodeSubprocessDriver (run per-turn)
+      agent_type=qoder       + agent_mode=tmux        → QoderTmuxDriver (tmux + JSONL)
+      agent_type=qoder       + agent_mode=subprocess  → QoderSubprocessDriver (run per-turn)
     """
     agent_type = config.agent_type
     agent_mode = config.agent_mode
+    qoder_cmd = config.claude_command if config.claude_command != "claude" else "qodercli"
+
+    if agent_type == "qoder" and agent_mode == "subprocess":
+        from agentgate_backend.qoder_subprocess_driver import QoderSubprocessDriver
+        return QoderSubprocessDriver(
+            qoder_command=qoder_cmd,
+            work_dir=str(config.work_dir),
+            model=config.opencode_model,
+        )
+
+    if agent_type == "qoder":  # tmux mode
+        from agentgate_backend.qoder_tmux_driver import QoderTmuxDriver
+        return QoderTmuxDriver(
+            tmux_manager=tmux,
+            qoder_command=qoder_cmd,
+            work_dir=str(config.work_dir),
+            model=config.opencode_model,
+        )
 
     if agent_type == "opencode" and agent_mode == "subprocess":
         from agentgate_backend.opencode_subprocess_driver import OpenCodeSubprocessDriver
@@ -223,7 +243,7 @@ def _create_driver(config: BackendConfig, tmux):
         )
 
     # Default: claude-code + tmux
-    from agentgate_backend.claude_code_driver import ClaudeCodeDriver
+    from agentgate_backend.claude_code_tmux_driver import ClaudeCodeDriver
     from agentgate_backend.session import SessionManager
     return ClaudeCodeDriver(
         claude_command=config.claude_command,

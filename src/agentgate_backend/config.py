@@ -81,6 +81,7 @@ config: BackendConfig = BackendConfig()
 _PROCESS_NAME_DEFAULTS = {
     "claude-code": "claude",
     "opencode": "node",
+    "qoder": "qodercli",
 }
 
 

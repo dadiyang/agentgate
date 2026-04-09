@@ -105,8 +105,9 @@ class SessionManager:
 
     window_states: dict[str, WindowState] = field(default_factory=dict)
     user_window_offsets: dict[int, dict[str, int]] = field(default_factory=dict)
-    # window_id -> display name (window_name)
     window_display_names: dict[str, str] = field(default_factory=dict)
+    # Projects root — defaults to CC's ~/.claude/projects, override for other agents
+    projects_root: Path = field(default_factory=lambda: config.claude_projects_path)
 
     def __post_init__(self) -> None:
         self._load_state()
@@ -415,7 +416,7 @@ class SessionManager:
             return None
         # Encode cwd: /data/code/agentgate -> -data-code-agentgate
         encoded_cwd = cwd.replace("/", "-")
-        return config.claude_projects_path / encoded_cwd / f"{session_id}.jsonl"
+        return self.projects_root / encoded_cwd / f"{session_id}.jsonl"
 
     async def _get_session_direct(
         self, session_id: str, cwd: str
@@ -426,7 +427,7 @@ class SessionManager:
         # Fallback: glob search if direct path doesn't exist
         if not file_path or not file_path.exists():
             pattern = f"*/{session_id}.jsonl"
-            matches = list(config.claude_projects_path.glob(pattern))
+            matches = list(self.projects_root.glob(pattern))
             if matches:
                 file_path = matches[0]
                 logger.debug("Found session via glob: %s", file_path)
