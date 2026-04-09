@@ -171,6 +171,19 @@ async def run(config: GatewayConfig, config_path: Path | None = None) -> None:
             on_message,
             proxy=config.channels.telegram.proxy,
         )
+    if config.channels.dingtalk_bots:
+        from agentgate_gateway.adapters.dingtalk import DingTalkAdapter
+
+        for bot_cfg in config.channels.dingtalk_bots:
+            bot_id = bot_cfg.bot_id or bot_cfg.client_id
+            adapter = DingTalkAdapter(
+                client_id=bot_cfg.client_id,
+                client_secret=bot_cfg.client_secret,
+                on_message=on_message,
+                bot_id=bot_id,
+                allow_from=bot_cfg.allow_from,
+            )
+            adapters[f"dingtalk:{bot_id}"] = adapter
 
     # 8. Output poller
     poller = OutputPoller(db, router, backend_states, adapters, config.poll_interval, alert_manager=alert_mgr)

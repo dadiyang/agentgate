@@ -28,11 +28,19 @@ class TelegramConfig(BaseModel):
     proxy: str = ""
 
 
+class DingTalkBotConfig(BaseModel):
+    client_id: str
+    client_secret: str
+    bot_id: str = ""          # Optional: used as bot_id in routes, defaults to client_id
+    allow_from: str = "*"     # "*" or comma-separated staffId whitelist
+
+
 class ChannelsConfig(BaseModel):
     feishu: FeishuConfig | None = None
     feishu_apps: list[FeishuAppConfig] | None = None
     telegram: TelegramConfig | None = None
     telegram_bots: list[TelegramBotConfig] | None = None
+    dingtalk_bots: list[DingTalkBotConfig] | None = None
 
 
 class BackendConfig(BaseModel):
@@ -97,5 +105,12 @@ class GatewayConfig(BaseModel):
             # Remove the original telegram key (no longer a single-bot config)
             if not tg:  # empty after extracting bots and proxy
                 del channels["telegram"]
+
+        # DingTalk: normalize channels.dingtalk.bots → dingtalk_bots
+        dt = channels.get("dingtalk")
+        if isinstance(dt, dict) and "bots" in dt:
+            channels["dingtalk_bots"] = dt.pop("bots")
+            if not dt:
+                del channels["dingtalk"]
 
         return cls(**data)
