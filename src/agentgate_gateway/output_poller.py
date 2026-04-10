@@ -212,9 +212,11 @@ class OutputPoller:
             return
 
         poll_id = uuid.uuid4().hex[:8]
+        # 从 backend 获取最新的 action_id（如果有返回）
+        action_id = data.get("latest_action_id", data.get("latest_message_id"))
         logger.info(
-            "Polled %d new messages from backend=%s poll=%s (offset %d→%d)",
-            msg_count, backend_id, poll_id, offset, next_offset,
+            "Polled %d new messages from backend=%s poll=%s (offset %d→%d) action_id=%s",
+            msg_count, backend_id, poll_id, offset, next_offset, action_id or "none",
         )
         await self._set_offset(backend_id, next_offset)
 
@@ -249,7 +251,7 @@ class OutputPoller:
                 combined = "\n\n".join(texts)
             for channel_type, bot_id, chat_id in bindings:
                 task = asyncio.create_task(
-                    self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined, poll_offset=offset, poll_id=poll_id)
+                    self._push_to_channel(backend_id, channel_type, bot_id, chat_id, combined, poll_offset=offset, poll_id=poll_id, action_id=action_id)
                 )
                 self._push_tasks.add(task)
 
@@ -284,30 +286,34 @@ class OutputPoller:
             if not unprocessed:
                 return
 
-            message_ids = [m["message_id"] for m in unprocessed]
+            # backend 返回的是 action_id（透传的 message_id），但 DB 里存储的是 msg_id（主键）
+            # 需要从 DB 反查 action_id -> msg_id 的映射
+            action_ids = [m.get("message_id", m.get("action_id")) for m in unprocessed]
 
             # Confirm on backend
             resp = await self._http.post(
                 f"{url}/api/confirm_processed",
-                json={"message_ids": message_ids},
+                json={"action_ids": action_ids},
                 headers={"Authorization": f"Bearer {token}"},
             )
             if resp.status_code != 200:
                 logger.warning("confirm_processed failed for %s: %d", backend_id, resp.status_code)
 
-            # Update gateway DB: mark these messages as delivered
-            for mid in message_ids:
+            # Update gateway DB: 按 action_id 查询 inbound 消息并标记为 delivered
+            for action_id in action_ids:
                 try:
-                    await self._db.update_status(mid, "delivered")
+                    pending = await self._db.get_inbound_by_action_id(action_id)
+                    for msg in pending:
+                        await self._db.update_status(msg["id"], "delivered")
                 except Exception as e:
-                    logger.error("Failed to update process_status for %s: %s", mid, e, exc_info=True)
+                    logger.error("Failed to update status for action_id=%s: %s", action_id, e, exc_info=True)
 
         except Exception as e:
             logger.error("confirm_processed error for %s: %s", backend_id, e, exc_info=True)
 
     async def _push_to_channel(
         self, backend_id: str, channel_type: str, bot_id: str, chat_id: str, text: str,
-        poll_offset: int = 0, poll_id: str = "",
+        poll_offset: int = 0, poll_id: str = "", action_id: str | None = None,
     ):
         # Split raw text FIRST, then format each part for the channel.
         # Formatting (e.g. Feishu JSON) can change size and structure;
@@ -341,6 +347,7 @@ class OutputPoller:
                 {
                     "id": msg_id,
                     "fetched_at": now,
+                    "action_id": action_id,
                     "backend_id": backend_id,
                     "channel_type": channel_type,
                     "chat_id": chat_id,
