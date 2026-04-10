@@ -391,7 +391,7 @@ class SelfMonitor:
         )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
             try:
                 windows = await self._tmux.list_windows()
                 for w in windows:
@@ -414,9 +414,10 @@ class SelfMonitor:
             if not session:
                 return False
 
-            window = session.windows.get(window_id=wid)
-            if not window:
+            windows = session.windows.filter(window_id=wid)
+            if not windows:
                 return False
+            window = windows[0]
 
             pane = window.active_pane
             if not pane:

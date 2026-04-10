@@ -108,12 +108,25 @@ def _detect_bot_id(config: dict, channel: str) -> str:
 def _systemctl(
     action: str, service: str, check: bool = True
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
+    """Run systemctl command. Default check=True to surface errors.
+
+    Use check=False only when command failure is expected or non-critical
+    (e.g., stopping a service that may not exist).
+    """
+    result = subprocess.run(
         ["sudo", "systemctl", action, service],
         capture_output=True,
         text=True,
         check=check,
     )
+    if not result.returncode == 0:
+        logger.error(
+            "systemctl %s %s failed: %s",
+            action,
+            service,
+            result.stderr.strip(),
+        )
+    return result
 
 
 def _is_service_active(name: str) -> bool:
@@ -349,8 +362,8 @@ def create(
     subprocess.run(
         ["sudo", "systemctl", "daemon-reload"], capture_output=True, check=True
     )
-    _systemctl("enable", service, check=False)
-    _systemctl("start", service, check=False)
+    _systemctl("enable", service)
+    _systemctl("start", service)
 
     # 10. Restart gateway to pick up new config
     click.echo("  Restarting agentgate-gateway...")
@@ -502,8 +515,8 @@ def remove(name, yes):
     # 1. Stop and disable systemd service
     service = SYSTEMD_TEMPLATE.format(name=name)
     click.echo(f"  Stopping {service}...")
-    _systemctl("stop", service, check=False)
-    _systemctl("disable", service, check=False)
+    _systemctl("stop", service)
+    _systemctl("disable", service)
 
     # 2. Kill tmux session (if exists)
     tmux_session = f"agentgate-{name}"
@@ -543,9 +556,9 @@ def remove(name, yes):
             conn.commit()
             conn.close()
             click.echo(f"  Cleaned poll_offsets for '{name}'")
-        except Exception as e:
-            logger.warning("Table may not exist yet: %s", e)
-            pass  # Table may not exist yet
+        except sqlite3.OperationalError as e:
+            # Table may not exist yet
+            logger.info("poll_offsets table not found (may be first run): %s", e)
 
     click.echo(f"\n✓ Instance '{name}' removed.")
     click.echo(

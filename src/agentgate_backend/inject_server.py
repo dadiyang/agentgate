@@ -692,6 +692,9 @@ def create_driver_app(
             )
 
         if message_id and message_store.has(message_id):
+            logger.info(
+                "HTTP inject (driver): duplicate message_id=%s, skipping", message_id
+            )
             return web.json_response(
                 {
                     "ok": True,

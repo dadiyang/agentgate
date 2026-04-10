@@ -191,7 +191,9 @@ class DingTalkAdapter(ChannelAdapter):
                     content if isinstance(content, dict) else json.loads(content)
                 )
                 text = raw_content.get("recognition", "")
-            except (json.JSONDecodeError, AttributeError):
+            except json.JSONDecodeError:
+                text = ""
+            except (KeyError, TypeError):
                 text = ""
             if not text:
                 logger.warning(
