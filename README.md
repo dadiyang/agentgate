@@ -2,7 +2,7 @@
 
 **Turn IM and HTTP into control channels for your CLI AI agents.**
 
-Send a message in Feishu or Telegram, your agent gets it. Call an HTTP endpoint, your agent gets it. Agent produces output, it shows up in your chat or API response. No terminal required.
+Send a message in Feishu, Telegram, or DingTalk, your agent gets it. Call an HTTP endpoint, your agent gets it. Agent produces output, it shows up in your chat or API response. No terminal required.
 
 [中文文档](README.zh-CN.md)
 
@@ -13,8 +13,8 @@ Send a message in Feishu or Telegram, your agent gets it. Call an HTTP endpoint,
 AgentGate sits between your IM / HTTP clients and your CLI agents (Claude Code, OpenCode, etc.):
 
 ```
-Feishu / Telegram / HTTP  →  AgentGate Gateway  →  Agent Backend  →  CLI Agent
-                          ←  (output pushed back)  ←                ←
+Feishu / Telegram / DingTalk / HTTP  →  AgentGate Gateway  →  Agent Backend  →  CLI Agent
+                                     ←  (output pushed back)  ←                ←
 ```
 
 **For end users:** message a bot in your IM group, the agent works on it, replies appear in the same group. As natural as chatting with a colleague.
@@ -111,10 +111,21 @@ channels:
         bot_token: "123456:ABC-DEF..."
         proxy: "http://127.0.0.1:7897"   # optional, for regions that need it
 
+  dingtalk:
+    bots:
+      - client_id: your_client_id
+        client_secret: your_client_secret
+        bot_id: your_bot_id
+
 routes:
   - channel: telegram
     bot_id: my_bot
     chat_id: "7003732745"       # user or group chat ID
+    backend: my-agent
+
+  - channel: dingtalk
+    bot_id: your_client_id      # DingTalk uses client_id as bot_id
+    chat_id: conversation_id    # DingTalk conversation ID
     backend: my-agent
 ```
 
@@ -244,6 +255,8 @@ AgentGate doesn't care what CLI agent you run. The `AgentDriver` protocol abstra
 | Claude Code | subprocess | stream-json stdout |
 | OpenCode | tmux | SQLite WAL query |
 | OpenCode | subprocess | stream-json stdout |
+| Qoder | tmux | JSONL file polling (per-session) |
+| Qoder | subprocess | stream-json stdout |
 
 Adding a new agent type means implementing the `AgentDriver` protocol — about 200 lines. No framework changes.
 
@@ -357,6 +370,12 @@ The two layers talk over HTTP. Same machine or different machines, your call.
 ```bash
 # Create a new backend instance (auto-allocates port, generates token)
 agentgate-ctl create my-agent --work-dir ~/my-project --channel telegram --chat-id "7003732745"
+
+# With DingTalk channel
+agentgate-ctl create my-dingtalk --work-dir ~/my-project --channel dingtalk --chat-id "conversation_id" --bot-id "client_id"
+
+# With Qoder agent
+agentgate-ctl create my-qoder --work-dir ~/qoder-project --agent-type qoder
 
 # List all instances
 agentgate-ctl list
@@ -527,6 +546,7 @@ Missing step tells you where it broke:
 - More channels — Discord, Slack, WeChat Work
 - Web dashboard — route management, health overview, message browser
 - Distributed deployment — backends are standalone HTTP services, already deployable across hosts
+- Qoder subprocess mode — per-turn subprocess execution
 
 ---
 

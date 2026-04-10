@@ -1,6 +1,6 @@
 ---
 name: agentgate-usage
-description: AgentGate 多通道 CLI Agent 网关的使用指南。覆盖实例创建管理（agentgate-ctl create/send/list/status）、gateway 配置（backends/channels/routes）、.env 配置项、OpenCode + 本地模型（llama-server）接入、agent 间消息通信、消息丢失排查（4 步日志链路 + trace_id/poll_id 关联）。当需要创建 agentgate backend 实例、配置 gateway 路由、接入新 agent、发送 agent 间消息、排查消息未送达、配置 OpenCode 本地模型、或操作 agentgate-ctl 命令时触发此技能。
+description: AgentGate 多通道 CLI Agent 网关的使用指南。覆盖实例创建管理（agentgate-ctl create/send/list/status）、gateway 配置（backends/channels/routes）、.env 配置项、OpenCode + 本地模型（llama-server）接入、Qoder agent 支持、DingTalk 通道配置、agent 间消息通信、消息丢失排查（4 步日志链路 + trace_id/poll_id 关联）。当需要创建 agentgate backend 实例、配置 gateway 路由、接入新 agent（claude-code/opencode/qoder）、配置 DingTalk 通道、发送 agent 间消息、排查消息未送达、或操作 agentgate-ctl 命令时触发此技能。
 ---
 
 # AgentGate 使用指南
@@ -18,7 +18,15 @@ IM / HTTP → Gateway (路由+持久化+轮询) → Backend (进程管理+健康
 ## 实例管理
 
 ```bash
+# Telegram channel
 agentgate-ctl create my-agent --work-dir ~/project --channel telegram --chat-id "123"
+
+# DingTalk channel (requires --bot-id)
+agentgate-ctl create my-dingtalk --work-dir ~/project --channel dingtalk --chat-id "conversation_id" --bot-id "client_id"
+
+# Qoder agent
+agentgate-ctl create my-qoder --work-dir ~/qoder-project --agent-type qoder
+
 agentgate-ctl list / status <name> / start / stop / restart / remove <name>
 ```
 
@@ -37,9 +45,9 @@ agentgate-ctl send --status                   # 健康概览
 
 `AGENTGATE_NAME`、`AGENTGATE_PORT`（= `HTTP_PORT`，必须一致）、`AGENTGATE_API_TOKEN`、`AGENTGATE_WORK_DIR`、`AGENTGATE_TMUX_SESSION_NAME`（= `agentgate-<name>`）
 
-可选：`AGENTGATE_AGENT_TYPE`（claude-code|opencode）、`AGENTGATE_AGENT_MODE`（tmux|subprocess）、`AGENTGATE_OPENCODE_MODEL`、`AGENTGATE_PROCESS_NAME`（见下）
+可选：`AGENTGATE_AGENT_TYPE`（claude-code|opencode|qoder）、`AGENTGATE_AGENT_MODE`（tmux|subprocess）、`AGENTGATE_OPENCODE_MODEL`、`AGENTGATE_PROCESS_NAME`（见下）
 
-**`AGENTGATE_PROCESS_NAME`**：SelfMonitor 用此值判断 agent 是否存活，必须匹配 tmux 报告的前台进程名（`pane_current_command`）。不匹配会导致误判死亡并反复重启。按 agent_type 自动推导默认值（CC=`claude`，OC=`node`），通常不需要手动设。原生编译的 OpenCode 二进制需要覆盖为 `opencode`。验证命令：`tmux list-windows -F '#{window_name} #{pane_current_command}'`
+**`AGENTGATE_PROCESS_NAME`**：SelfMonitor 用此值判断 agent 是否存活，必须匹配 tmux 报告的前台进程名（`pane_current_command`）。不匹配会导致误判死亡并反复重启。按 agent_type 自动推导默认值（CC=`claude`，OC=`node`，Qoder=`qodercli`），通常不需要手动设。原生编译的 OpenCode 二进制需要覆盖为 `opencode`。验证命令：`tmux list-windows -F '#{window_name} #{pane_current_command}'`
 
 ### gateway config（`~/.agentgate/gateway/config.yaml`）
 
@@ -48,13 +56,29 @@ backends:
   my-agent:
     url: http://127.0.0.1:8903
     api_token: <same-as-env>
+    agent_type: claude-code               # claude-code|opencode|qoder
     default_window: <WORK_DIR-basename>   # ⚠️ 最常出错：必须 = WORK_DIR 的 basename
+
+channels:
+  telegram:
+    bots:
+      - bot_id: my_bot
+        bot_token: "123456:ABC-DEF..."
+
+  dingtalk:
+    bots:
+      - client_id: your_client_id
+        client_secret: your_client_secret
+        bot_id: your_bot_id
+
 routes:
   - channel: telegram
     bot_id: my_bot
     chat_id: "7003732745"
-    backend: my-agent                     # 字段名是 backend 不是 backend_id
+    backend: my-agent
 ```
+
+热加载：`kill -HUP $(pidof agentgate-gateway)` 或 `POST /api/admin/reload`
 
 热加载：`kill -HUP $(pidof agentgate-gateway)` 或 `POST /api/admin/reload`
 
