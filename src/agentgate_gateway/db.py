@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 _CREATE_MESSAGES = """
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
+    action_id TEXT,
     direction TEXT NOT NULL,
     timestamp TEXT NOT NULL,
     backend_id TEXT,
@@ -89,12 +90,12 @@ class MessageDB:
         await self._conn.execute(
             """
             INSERT INTO messages (
-                id, direction, timestamp, backend_id,
+                id, action_id, direction, timestamp, backend_id,
                 channel_type, channel_bot_id, chat_id, group_name,
                 sender_id, sender_name, content, status,
                 retry_count, error_message, dedup_key
             ) VALUES (
-                :id, 'inbound', :timestamp, :backend_id,
+                :id, :action_id, 'inbound', :timestamp, :backend_id,
                 :channel_type, :channel_bot_id, :chat_id, :group_name,
                 :sender_id, :sender_name, :content, 'pending',
                 0, NULL, :dedup_key
@@ -102,6 +103,7 @@ class MessageDB:
             """,
             {
                 "id": msg.get("id"),
+                "action_id": msg.get("action_id"),
                 "timestamp": msg.get("received_at") or msg.get("timestamp"),
                 "backend_id": msg.get("backend_id"),
                 "channel_type": msg.get("channel_type"),
@@ -122,12 +124,12 @@ class MessageDB:
         await self._conn.execute(
             """
             INSERT INTO messages (
-                id, direction, timestamp, backend_id,
+                id, action_id, direction, timestamp, backend_id,
                 channel_type, chat_id, group_name, content,
                 status, shard_index, shard_total,
                 retry_count, error_message, content_hash
             ) VALUES (
-                :id, 'outbound', :timestamp, :backend_id,
+                :id, :action_id, 'outbound', :timestamp, :backend_id,
                 :channel_type, :chat_id, :group_name, :content,
                 'pending', :shard_index, :shard_total,
                 0, NULL, :content_hash
@@ -135,6 +137,7 @@ class MessageDB:
             """,
             {
                 "id": msg.get("id"),
+                "action_id": msg.get("action_id"),
                 "timestamp": msg.get("fetched_at") or msg.get("timestamp"),
                 "backend_id": msg.get("backend_id"),
                 "channel_type": msg.get("channel_type"),
@@ -190,7 +193,9 @@ class MessageDB:
             rows = await cursor.fetchall()
         return [_row_to_dict(r) for r in rows]
 
-    async def get_failed(self, direction: str, backend_id: str | None = None) -> list[dict]:
+    async def get_failed(
+        self, direction: str, backend_id: str | None = None
+    ) -> list[dict]:
         """Get failed messages, optionally filtered by backend_id."""
         assert self._conn is not None, "DB not initialized"
         if backend_id:
@@ -211,6 +216,16 @@ class MessageDB:
         ) as cursor:
             row = await cursor.fetchone()
         return row is not None
+
+    async def get_inbound_by_action_id(self, action_id: str) -> list[dict]:
+        """Get inbound messages by action_id."""
+        assert self._conn is not None, "DB not initialized"
+        async with self._conn.execute(
+            "SELECT * FROM messages WHERE direction = 'inbound' AND action_id = ?",
+            (action_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_dict(r) for r in rows]
 
     async def has_content_hash(self, backend_id: str, content_hash: str) -> bool:
         """Check if an outbound message with this content_hash exists for this backend."""
@@ -274,7 +289,9 @@ class MessageDB:
         page_size = int(filters.get("page_size", 50))
         offset = (page - 1) * page_size
 
-        data_sql = f"SELECT * FROM messages {where} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        data_sql = (
+            f"SELECT * FROM messages {where} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        )
         async with self._conn.execute(data_sql, params + [page_size, offset]) as cursor:
             rows = await cursor.fetchall()
 
@@ -285,7 +302,9 @@ class MessageDB:
     async def load_poll_offsets(self) -> dict[str, int]:
         """Load all persisted poll offsets. Returns {backend_id: byte_offset}."""
         assert self._conn is not None, "DB not initialized"
-        async with self._conn.execute("SELECT backend_id, byte_offset FROM poll_offsets") as cursor:
+        async with self._conn.execute(
+            "SELECT backend_id, byte_offset FROM poll_offsets"
+        ) as cursor:
             rows = await cursor.fetchall()
         return {row["backend_id"]: row["byte_offset"] for row in rows}
 

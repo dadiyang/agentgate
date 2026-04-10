@@ -21,7 +21,14 @@ RETRY_DELAYS = [5, 10, 15]
 
 
 class InboundHandler:
-    def __init__(self, db: MessageDB, router: Router, backends: dict, adapters: dict, alert_manager=None):
+    def __init__(
+        self,
+        db: MessageDB,
+        router: Router,
+        backends: dict,
+        adapters: dict,
+        alert_manager=None,
+    ):
         """
         backends: dict of backend_id -> object with .url, .api_token attributes
         adapters: dict of channel_type -> ChannelAdapter
@@ -48,35 +55,61 @@ class InboundHandler:
         text: str,
         dedup_key: str,
         target_backend_id: str | None = None,
-        message_id: str | None = None,
+        action_id: str | None = None,
         fire_and_forget: bool = False,
     ):
         """Called by channel adapters when a message arrives.
 
         target_backend_id: When set (e.g. HTTP channel), skip route matching
         and inject directly to the specified backend.
-        message_id: When set, use this ID instead of generating a new UUID.
+        action_id: When set, use this ID instead of generating a new UUID.
         fire_and_forget: When True, persist the message and start injection
         in a background task instead of awaiting it.  Used by the HTTP inject
         endpoint so the caller gets a fast response.
         """
-        with _tracer.start_as_current_span("inbound", attributes={
-            "channel": channel_type, "bot_id": bot_id, "chat_id": chat_id,
-        }):
+        with _tracer.start_as_current_span(
+            "inbound",
+            attributes={
+                "channel": channel_type,
+                "bot_id": bot_id,
+                "chat_id": chat_id,
+            },
+        ):
             return await self._handle_message_inner(
-                channel_type, bot_id, chat_id, sender_id, sender_name,
-                group_name, text, dedup_key, target_backend_id, message_id,
+                channel_type,
+                bot_id,
+                chat_id,
+                sender_id,
+                sender_name,
+                group_name,
+                text,
+                dedup_key,
+                target_backend_id,
+                action_id,
                 fire_and_forget,
             )
 
     async def _handle_message_inner(
-        self, channel_type, bot_id, chat_id, sender_id, sender_name,
-        group_name, text, dedup_key, target_backend_id, message_id,
+        self,
+        channel_type,
+        bot_id,
+        chat_id,
+        sender_id,
+        sender_name,
+        group_name,
+        text,
+        dedup_key,
+        target_backend_id,
+        action_id,
         fire_and_forget,
     ):
         logger.info(
             "Inbound: channel=%s bot=%s chat=%s sender=%s text=%s",
-            channel_type, bot_id, chat_id, sender_name, text[:80],
+            channel_type,
+            bot_id,
+            chat_id,
+            sender_name,
+            text[:80],
         )
 
         # 1. Dedup check (3-layer idempotency: channel level)
@@ -91,22 +124,33 @@ class InboundHandler:
         else:
             backend_id = self._router.match(channel_type, bot_id, chat_id)
             if backend_id:
-                logger.info("Inbound routed: (%s, %s, %s) → %s", channel_type, bot_id, chat_id, backend_id)
+                logger.info(
+                    "Inbound routed: (%s, %s, %s) → %s",
+                    channel_type,
+                    bot_id,
+                    chat_id,
+                    backend_id,
+                )
             if not backend_id:
                 logger.warning(
                     "No route matched — message dropped. "
                     "channel=%s bot_id=%s chat_id=%s sender=%s "
                     "(add a route in config.yaml to handle this group)",
-                    channel_type, bot_id, chat_id, sender_name,
+                    channel_type,
+                    bot_id,
+                    chat_id,
+                    sender_name,
                 )
                 return
 
         # 3. Persist BEFORE processing (crash safety)
-        msg_id = message_id or str(uuid.uuid4())
+        msg_id = str(uuid.uuid4())
+        action_id = action_id or str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         await self._db.save_inbound(
             {
                 "id": msg_id,
+                "action_id": action_id,
                 "received_at": now,
                 "channel_type": channel_type,
                 "channel_bot_id": bot_id,
@@ -122,9 +166,11 @@ class InboundHandler:
 
         # 4. Inject to backend with retry
         if fire_and_forget:
-            asyncio.create_task(self._inject_with_retry(
-                msg_id, backend_id, text, sender_name, channel_type, chat_id
-            ))
+            asyncio.create_task(
+                self._inject_with_retry(
+                    msg_id, backend_id, text, sender_name, channel_type, chat_id
+                )
+            )
         else:
             await self._inject_with_retry(
                 msg_id, backend_id, text, sender_name, channel_type, chat_id
@@ -147,11 +193,7 @@ class InboundHandler:
             )
             return
 
-        url = (
-            backend.url
-            if hasattr(backend, "url")
-            else backend.get("url", "")
-        )
+        url = backend.url if hasattr(backend, "url") else backend.get("url", "")
         token = (
             backend.api_token
             if hasattr(backend, "api_token")
@@ -171,7 +213,7 @@ class InboundHandler:
                     json={
                         "window_name": window_name,
                         "text": text,
-                        "message_id": msg_id,
+                        "action_id": msg_id,
                         "sender_name": sender_name,
                     },
                     headers={"Authorization": f"Bearer {token}"},
@@ -182,7 +224,10 @@ class InboundHandler:
                     if data.get("ok"):
                         logger.info(
                             "Inject ok: backend=%s msg_id=%s delivery_id=%s elapsed=%.0fms",
-                            backend_id, msg_id, data.get("delivery_id"), elapsed_ms,
+                            backend_id,
+                            msg_id,
+                            data.get("delivery_id"),
+                            elapsed_ms,
                         )
                         await self._db.update_status(msg_id, "delivered")
                         return
@@ -217,7 +262,8 @@ class InboundHandler:
         if self._alert_manager:
             try:
                 await self._alert_manager.send(
-                    "inbound_delivery_failed", "WARNING",
+                    "inbound_delivery_failed",
+                    "WARNING",
                     f"消息送达 {MAX_RETRY} 次重试后失败 (backend={backend_id}, msg_id={msg_id})",
                     backend_id,
                 )
