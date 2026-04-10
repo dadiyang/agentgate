@@ -84,6 +84,7 @@ class OpenCodeTmuxDriver:
         if not window:
             return False, f"Window '{window_name}' not found"
         from .session import session_manager
+
         return await session_manager.send_to_window(window.window_id, text)
 
     async def read_output(self, window_name: str, since: int) -> OutputResult:
@@ -96,7 +97,9 @@ class OpenCodeTmuxDriver:
         latest = self._find_latest_session_id()
         if latest:
             if latest != self._session_id:
-                logger.info("OpenCode driver: session changed %s → %s", self._session_id, latest)
+                logger.info(
+                    "OpenCode driver: session changed %s → %s", self._session_id, latest
+                )
                 self._session_id = latest
                 # Seed to the current position in the new session — skip history.
                 # Returning cursor=0 would cause the poller to replay ALL content
@@ -127,14 +130,15 @@ class OpenCodeTmuxDriver:
             )
             rows = cur.fetchall()
         except sqlite3.Error as e:
-            logger.error("OpenCode driver: SQLite read error: %s", e)
+            logger.error("OpenCode driver: SQLite read error: %s", e, exc_info=True)
             # Connection may be stale (DB rebuilt). Reset for next call.
             if self._db:
                 try:
                     self._db.close()
                 except Exception as _close_err:
-                    logger.warning("OpenCode driver: DB close failed during reset: %s", _close_err)
-                    pass
+                    logger.warning(
+                        "OpenCode driver: DB close failed during reset: %s", _close_err
+                    )
                 self._db = None
             return OutputResult(messages=[], count=0, cursor=since)
 
@@ -148,7 +152,9 @@ class OpenCodeTmuxDriver:
                 part = json.loads(part_data_str)
                 msg_meta = json.loads(msg_data_str)
             except (json.JSONDecodeError, TypeError) as e:
-                logger.warning("OC read_output: bad part data at ts=%d: %s", time_created, e)
+                logger.warning(
+                    "OC read_output: bad part data at ts=%d: %s", time_created, e
+                )
                 if time_created > max_ts:
                     max_ts = time_created
                 continue
@@ -172,7 +178,10 @@ class OpenCodeTmuxDriver:
                 # If we advance past them, the real content is never seen.
                 pt = part.get("type", "?")
                 if pt == "text" and not part.get("text"):
-                    logger.debug("OC read_output: skipping empty text part at ts=%d (not advancing cursor)", time_created)
+                    logger.debug(
+                        "OC read_output: skipping empty text part at ts=%d (not advancing cursor)",
+                        time_created,
+                    )
                     # Do NOT update max_ts — leave cursor behind this part
                     # so next poll re-reads it after OC fills in the content.
                 else:
@@ -184,13 +193,21 @@ class OpenCodeTmuxDriver:
             logger.info(
                 "OC read_output: session=%s since=%d → %d rows, %d user-skip, %d none-convert, %d returned, cursor=%d",
                 self._session_id[:16] if self._session_id else "?",
-                since, len(rows), _user_skipped, _none_converted, len(messages), max_ts,
+                since,
+                len(rows),
+                _user_skipped,
+                _none_converted,
+                len(messages),
+                max_ts,
             )
 
         if messages:
             logger.info(
                 "OC output: session=%s %d messages (cursor %d→%d)",
-                self._session_id[:12] if self._session_id else "?", len(messages), since, max_ts,
+                self._session_id[:12] if self._session_id else "?",
+                len(messages),
+                since,
+                max_ts,
             )
         return OutputResult(messages=messages, count=len(messages), cursor=max_ts)
 
@@ -199,6 +216,7 @@ class OpenCodeTmuxDriver:
     @property
     def process_name(self) -> str:
         from .config import config as _backend_config
+
         return _backend_config.process_name
 
     @property
@@ -220,7 +238,11 @@ class OpenCodeTmuxDriver:
             row = cur.fetchone()
             return row[0] if row and row[0] else 0
         except sqlite3.Error as e:
-            logger.warning("OpenCode driver: failed to get max timestamp for session %s: %s", self._session_id, e)
+            logger.warning(
+                "OpenCode driver: failed to get max timestamp for session %s: %s",
+                self._session_id,
+                e,
+            )
             return 0
 
     def _get_db(self) -> sqlite3.Connection | None:
@@ -237,7 +259,7 @@ class OpenCodeTmuxDriver:
             logger.info("OpenCode driver: connected to DB at %s", self._db_path)
             return conn
         except sqlite3.Error as e:
-            logger.error("OpenCode driver: DB open failed: %s", e)
+            logger.error("OpenCode driver: DB open failed: %s", e, exc_info=True)
             return None
 
     def _find_latest_session_id(self) -> str:
@@ -253,7 +275,7 @@ class OpenCodeTmuxDriver:
             if row:
                 return row[0]
         except sqlite3.Error as e:
-            logger.error("OpenCode driver: session lookup error: %s", e)
+            logger.error("OpenCode driver: session lookup error: %s", e, exc_info=True)
         return ""
 
     def close(self):
@@ -286,5 +308,10 @@ def _convert_part(part: dict, role: str) -> dict | None:
             return {"role": role, "text": output[:500], "content_type": "tool_result"}
         elif isinstance(output, (dict, list)):
             import json
-            return {"role": role, "text": json.dumps(output, ensure_ascii=False)[:500], "content_type": "tool_result"}
+
+            return {
+                "role": role,
+                "text": json.dumps(output, ensure_ascii=False)[:500],
+                "content_type": "tool_result",
+            }
     return None

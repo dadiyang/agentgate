@@ -97,14 +97,18 @@ class DingTalkAdapter(ChannelAdapter):
         if not webhook_url:
             logger.error(
                 "DingTalk send failed: no webhook cached for conversation_id=%s "
-                "(no inbound message received yet from this chat)", chat_id,
+                "(no inbound message received yet from this chat)",
+                chat_id,
             )
             return False
 
         if now_ms >= expires_at_ms - _WEBHOOK_EXPIRY_MARGIN_MS:
             logger.error(
                 "DingTalk send failed: webhook expired for conversation_id=%s "
-                "(expiry=%d now=%d) — agent took too long to respond", chat_id, expires_at_ms, now_ms,
+                "(expiry=%d now=%d) — agent took too long to respond",
+                chat_id,
+                expires_at_ms,
+                now_ms,
             )
             return False
 
@@ -120,14 +124,20 @@ class DingTalkAdapter(ChannelAdapter):
             elapsed_ms = (time.monotonic() - t0) * 1000
             logger.info(
                 "DingTalk send ok [%s]: conversation_id=%s elapsed=%.0fms",
-                self._bot_id, chat_id, elapsed_ms,
+                self._bot_id,
+                chat_id,
+                elapsed_ms,
             )
             return True
         except Exception as e:
             elapsed_ms = (time.monotonic() - t0) * 1000
             logger.error(
                 "DingTalk send failed [%s]: conversation_id=%s %s elapsed=%.0fms",
-                self._bot_id, chat_id, e, elapsed_ms, exc_info=True,
+                self._bot_id,
+                chat_id,
+                e,
+                elapsed_ms,
+                exc_info=True,
             )
             return False
 
@@ -159,7 +169,8 @@ class DingTalkAdapter(ChannelAdapter):
             self._webhook_cache[conversation_id] = (msg.session_webhook, expires_at)
             logger.debug(
                 "DingTalk webhook cached: conversation_id=%s expires_at=%d",
-                conversation_id, expires_at,
+                conversation_id,
+                expires_at,
             )
 
         # Permission check
@@ -175,13 +186,19 @@ class DingTalkAdapter(ChannelAdapter):
         if msg_type == "audio":
             # DingTalk performs ASR server-side; use the recognition field directly
             try:
-                raw_content = json.loads(msg.extensions.get("content", "{}")) if msg.extensions else {}
+                content = msg.extensions.get("content", "{}") if msg.extensions else {}
+                raw_content = (
+                    content if isinstance(content, dict) else json.loads(content)
+                )
                 text = raw_content.get("recognition", "")
-            except (json.JSONDecodeError, AttributeError):
+            except json.JSONDecodeError:
+                text = ""
+            except (KeyError, TypeError):
                 text = ""
             if not text:
                 logger.warning(
-                    "DingTalk audio message with no recognition: message_id=%s", msg.message_id,
+                    "DingTalk audio message with no recognition: message_id=%s",
+                    msg.message_id,
                 )
                 return
         elif msg_type == "text":
@@ -200,7 +217,11 @@ class DingTalkAdapter(ChannelAdapter):
 
         logger.info(
             "DingTalk inbound [%s]: conversation_id=%s sender=%s msg_type=%s text=%s",
-            self._bot_id, conversation_id, sender_name, msg_type, text[:80],
+            self._bot_id,
+            conversation_id,
+            sender_name,
+            msg_type,
+            text[:80],
         )
 
         if self._on_message:
@@ -237,7 +258,13 @@ class _BotMessageHandler:
         from dingtalk_stream import AckMessage, chatbot
 
         try:
-            data = json.loads(message.data)
+            logger.info("DingTalk raw message: %r", message.data)
+
+            # message.data is already a dict from the SDK, but handle both cases
+            if isinstance(message.data, str):
+                data = json.loads(message.data)
+            else:
+                data = message.data
             bot_msg = chatbot.ChatbotMessage.from_dict(data)
             await self._on_message_fn(bot_msg)
         except Exception as e:

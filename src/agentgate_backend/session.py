@@ -343,7 +343,7 @@ class SessionManager:
             # Only process entries for our tmux session
             if not key.startswith(prefix):
                 continue
-            window_id = key[len(prefix):]
+            window_id = key[len(prefix) :]
             # Old-format key (window_name instead of window_id): don't create
             # window_states entries with window_name keys, but remember the
             # session_id so migrated states survive the stale cleanup below.
@@ -458,10 +458,16 @@ class SessionManager:
                             if parsed and parsed.text.strip():
                                 last_user_msg = parsed.text.strip()
                     except json.JSONDecodeError as e:
-                        logger.warning("_get_session_direct: JSON parse error in %s: %s", file_path, e)
+                        logger.warning(
+                            "_get_session_direct: JSON parse error in %s: %s",
+                            file_path,
+                            e,
+                        )
                         continue
         except OSError as e:
-            logger.warning("_get_session_direct: could not read session file %s: %s", file_path, e)
+            logger.warning(
+                "_get_session_direct: could not read session file %s: %s", file_path, e
+            )
             return None
 
         if not summary:
@@ -541,7 +547,9 @@ class SessionManager:
         try:
             file_size = file_path.stat().st_size
         except OSError as e:
-            logger.warning("get_unread_info: could not stat session file %s: %s", file_path, e)
+            logger.warning(
+                "get_unread_info: could not stat session file %s: %s", file_path, e
+            )
             return None
 
         user_offset = self.get_user_window_offset(user_id, window_id)
@@ -631,7 +639,9 @@ class SessionManager:
                     if data:
                         entries.append(data)
         except OSError as e:
-            logger.error("Error reading session file %s: %s", file_path, e)
+            logger.error(
+                "Error reading session file %s: %s", file_path, e, exc_info=True
+            )
             return [], 0
 
         parsed_entries, _ = TranscriptParser.parse_entries(entries)
