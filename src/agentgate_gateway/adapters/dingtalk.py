@@ -186,10 +186,9 @@ class DingTalkAdapter(ChannelAdapter):
         if msg_type == "audio":
             # DingTalk performs ASR server-side; use the recognition field directly
             try:
+                content = msg.extensions.get("content", "{}") if msg.extensions else {}
                 raw_content = (
-                    json.loads(msg.extensions.get("content", "{}"))
-                    if msg.extensions
-                    else {}
+                    content if isinstance(content, dict) else json.loads(content)
                 )
                 text = raw_content.get("recognition", "")
             except (json.JSONDecodeError, AttributeError):
@@ -257,6 +256,8 @@ class _BotMessageHandler:
         from dingtalk_stream import AckMessage, chatbot
 
         try:
+            logger.info("DingTalk raw message: %r", message.data)
+
             # message.data is already a dict from the SDK, but handle both cases
             if isinstance(message.data, str):
                 data = json.loads(message.data)
