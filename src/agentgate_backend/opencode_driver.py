@@ -24,6 +24,7 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
+
 # Output message format (matches what gateway expects from CC backend)
 @dataclass
 class OutputMessage:
@@ -35,6 +36,7 @@ class OutputMessage:
 @dataclass
 class OpenCodeDriverState:
     """Persistent state for the OpenCode driver."""
+
     session_id: str = ""
     total_turns: int = 0
 
@@ -79,7 +81,8 @@ class OpenCodeDriver:
             await self._queue.put((text, message_id))
             logger.info(
                 "OpenCode: queued message (queue_size=%d) text=%s",
-                self._queue.qsize(), text[:60],
+                self._queue.qsize(),
+                text[:60],
             )
             return {"ok": True, "queued": True, "queue_size": self._queue.qsize()}
 
@@ -94,9 +97,7 @@ class OpenCodeDriver:
         for msg in self._output:
             msg_size = msg.get("_size", 100)
             if current_offset >= since:
-                messages.append({
-                    k: v for k, v in msg.items() if not k.startswith("_")
-                })
+                messages.append({k: v for k, v in msg.items() if not k.startswith("_")})
             current_offset += msg_size
 
         return {
@@ -174,7 +175,9 @@ class OpenCodeDriver:
 
         logger.info(
             "OpenCode: launching %s %s (session=%s)",
-            self._cmd, " ".join(args[:6]) + "...", self._session_id or "new",
+            self._cmd,
+            " ".join(args[:6]) + "...",
+            self._session_id or "new",
         )
 
         env = {**os.environ}
@@ -182,7 +185,8 @@ class OpenCodeDriver:
         env.setdefault("HOME", str(Path.home()))
 
         proc = await asyncio.create_subprocess_exec(
-            self._cmd, *args,
+            self._cmd,
+            *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._work_dir,
@@ -219,13 +223,19 @@ class OpenCodeDriver:
             stderr_text = stderr_bytes.decode().strip()
             logger.error(
                 "OpenCode: process exited with code %d, stderr=%s",
-                proc.returncode, stderr_text[:300],
+                proc.returncode,
+                stderr_text[:300],
+                exc_info=True,
             )
             if stderr_text and not collected_text:
                 self._last_error = stderr_text[:200]
-                self._append_output("assistant", f"⚠️ OpenCode error: {stderr_text[:200]}")
+                self._append_output(
+                    "assistant", f"⚠️ OpenCode error: {stderr_text[:200]}"
+                )
         elif not collected_text:
-            logger.warning("OpenCode: process exited successfully but produced no text output")
+            logger.warning(
+                "OpenCode: process exited successfully but produced no text output"
+            )
 
         self._current_proc = None
         self._save_state()
@@ -239,7 +249,9 @@ class OpenCodeDriver:
             part = event.get("part", {})
             sid = part.get("sessionID", "")
             if sid and sid != self._session_id:
-                logger.info("OpenCode: session_id updated: %s → %s", self._session_id, sid)
+                logger.info(
+                    "OpenCode: session_id updated: %s → %s", self._session_id, sid
+                )
                 self._session_id = sid
 
         elif event_type == "text":
@@ -280,7 +292,7 @@ class OpenCodeDriver:
 
         elif event_type == "error":
             error_msg = event.get("error", str(event))
-            logger.error("OpenCode event error: %s", error_msg)
+            logger.error("OpenCode event error: %s", error_msg, exc_info=True)
             self._last_error = str(error_msg)[:200]
 
         elif event_type == "step_finish":
@@ -289,16 +301,15 @@ class OpenCodeDriver:
             tokens = part.get("tokens", {})
             logger.info(
                 "OpenCode: step_finish cost=%.4f tokens=%s",
-                cost, json.dumps(tokens) if tokens else "?",
+                cost,
+                json.dumps(tokens) if tokens else "?",
             )
 
     # ------------------------------------------------------------------
     # Output buffer
     # ------------------------------------------------------------------
 
-    def _append_output(
-        self, role: str, text: str, content_type: str = "text"
-    ):
+    def _append_output(self, role: str, text: str, content_type: str = "text"):
         """Append a message to the output buffer."""
         msg = {
             "role": role,
@@ -323,7 +334,7 @@ class OpenCodeDriver:
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
             self._state_file.write_text(json.dumps(state, indent=2))
         except OSError as e:
-            logger.error("Failed to save opencode state: %s", e)
+            logger.error("Failed to save opencode state: %s", e, exc_info=True)
 
     def _load_state(self):
         """Load persisted session_id on startup."""
@@ -332,8 +343,6 @@ class OpenCodeDriver:
                 data = json.loads(self._state_file.read_text())
                 self._session_id = data.get("session_id", "")
                 if self._session_id:
-                    logger.info(
-                        "OpenCode: restored session_id=%s", self._session_id
-                    )
+                    logger.info("OpenCode: restored session_id=%s", self._session_id)
         except (OSError, json.JSONDecodeError) as e:
             logger.warning("Failed to load opencode state: %s", e)

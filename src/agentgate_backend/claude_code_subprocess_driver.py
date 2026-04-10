@@ -80,18 +80,24 @@ class ClaudeCodeSubprocessDriver:
 
         self._busy = True
         self._append_output("user", text)
-        msg = json.dumps({
-            "type": "user",
-            "message": {"role": "user", "content": text},
-        })
+        msg = json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": text},
+            }
+        )
         assert self._proc is not None and self._proc.stdin is not None
         try:
             self._proc.stdin.write((msg + "\n").encode())
             await self._proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError) as e:
-            logger.error("CC subprocess: stdin write failed (%s), restarting process", e)
+            logger.error(
+                "CC subprocess: stdin write failed (%s), restarting process",
+                e,
+                exc_info=True,
+            )
             self._busy = False
-            if not hasattr(self, '_inject_retry'):
+            if not hasattr(self, "_inject_retry"):
                 self._inject_retry = True
                 await self._start_process()
                 try:
@@ -110,7 +116,9 @@ class ClaudeCodeSubprocessDriver:
             if offset >= since:
                 messages.append({k: v for k, v in msg.items() if not k.startswith("_")})
             offset += size
-        return OutputResult(messages=messages, count=len(messages), cursor=self._output_bytes)
+        return OutputResult(
+            messages=messages, count=len(messages), cursor=self._output_bytes
+        )
 
     @property
     def process_name(self) -> str:
@@ -141,7 +149,9 @@ class ClaudeCodeSubprocessDriver:
                     self._session_id = sid
                     logger.info("CC subprocess: loaded session_id=%s from disk", sid)
         except Exception as e:
-            logger.error("CC subprocess: failed to load session_id: %s", e)
+            logger.error(
+                "CC subprocess: failed to load session_id: %s", e, exc_info=True
+            )
 
     def _save_session_id(self, session_id: str):
         """Persist session_id to disk."""
@@ -149,7 +159,9 @@ class ClaudeCodeSubprocessDriver:
             self._session_file.write_text(session_id)
             logger.info("CC subprocess: saved session_id=%s to disk", session_id)
         except Exception as e:
-            logger.error("CC subprocess: failed to save session_id: %s", e)
+            logger.error(
+                "CC subprocess: failed to save session_id: %s", e, exc_info=True
+            )
 
     # --- Internal ---
 
@@ -160,11 +172,15 @@ class ClaudeCodeSubprocessDriver:
         """
         async with self._start_lock:
             args = [
-                self._command, "-p",
-                "--input-format", "stream-json",
-                "--output-format", "stream-json",
+                self._command,
+                "-p",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
                 "--verbose",
-                "--permission-mode", self._permission_mode,
+                "--permission-mode",
+                self._permission_mode,
             ]
             if self._session_id:
                 args.extend(["--resume", self._session_id])
@@ -194,7 +210,11 @@ class ClaudeCodeSubprocessDriver:
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError as e:
-                    logger.warning("CC subprocess: JSON parse error on stdout line: %s | line=%r", e, line[:200])
+                    logger.warning(
+                        "CC subprocess: JSON parse error on stdout line: %s | line=%r",
+                        e,
+                        line[:200],
+                    )
                     continue
                 self._handle_event(event)
         except Exception as e:
@@ -207,8 +227,13 @@ class ClaudeCodeSubprocessDriver:
                 text = self._queue.get_nowait()
                 task = asyncio.create_task(self.inject("", text))
                 task.add_done_callback(
-                    lambda t: t.exception() and logger.error(
-                        "CC subprocess: queue drain task failed: %s", t.exception()
+                    lambda t: (
+                        t.exception()
+                        and logger.error(
+                            "CC subprocess: queue drain task failed: %s",
+                            t.exception(),
+                            exc_info=True,
+                        )
                     )
                 )
 
@@ -234,14 +259,23 @@ class ClaudeCodeSubprocessDriver:
                 text = self._queue.get_nowait()
                 task = asyncio.create_task(self.inject("", text))
                 task.add_done_callback(
-                    lambda t: t.exception() and logger.error(
-                        "CC subprocess: queue drain task failed: %s", t.exception()
+                    lambda t: (
+                        t.exception()
+                        and logger.error(
+                            "CC subprocess: queue drain task failed: %s",
+                            t.exception(),
+                            exc_info=True,
+                        )
                     )
                 )
 
     def _append_output(self, role: str, text: str, content_type: str = "text"):
-        msg = {"role": role, "text": text, "content_type": content_type,
-               "_size": len(text.encode()) + 50}
+        msg = {
+            "role": role,
+            "text": text,
+            "content_type": content_type,
+            "_size": len(text.encode()) + 50,
+        }
         self._output.append(msg)
         self._output_bytes += msg["_size"]
         # Trim oldest half when buffer exceeds max size (_output_bytes stays monotonic)

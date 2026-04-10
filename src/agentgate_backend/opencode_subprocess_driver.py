@@ -77,7 +77,17 @@ class OpenCodeSubprocessDriver:
             logger.info("OpenCode subprocess: queued (size=%d)", self._queue.qsize())
             return True, "Queued"
         task = asyncio.create_task(self._process_message(text, None))
-        task.add_done_callback(lambda t: t.cancelled() or (t.exception() and logger.error("OC process task failed: %s", t.exception())))
+        task.add_done_callback(
+            lambda t: (
+                t.cancelled()
+                or (
+                    t.exception()
+                    and logger.error(
+                        "OC process task failed: %s", t.exception(), exc_info=True
+                    )
+                )
+            )
+        )
         return True, "Injected"
 
     async def read_output(self, window_name: str, since: int) -> OutputResult:
@@ -87,12 +97,12 @@ class OpenCodeSubprocessDriver:
         for msg in self._output:
             msg_size = msg.get("_size", 100)
             if current_offset >= since:
-                messages.append({
-                    k: v for k, v in msg.items() if not k.startswith("_")
-                })
+                messages.append({k: v for k, v in msg.items() if not k.startswith("_")})
             current_offset += msg_size
         return OutputResult(
-            messages=messages, count=len(messages), cursor=self._output_bytes,
+            messages=messages,
+            count=len(messages),
+            cursor=self._output_bytes,
         )
 
     @property
@@ -132,7 +142,11 @@ class OpenCodeSubprocessDriver:
                 self._current_proc.kill()
                 await self._current_proc.wait()
             self._last_error = "Process timed out after 300s"
-            self._append_output("assistant", "⚠️ OpenCode error: timed out after 300s", content_type="text")
+            self._append_output(
+                "assistant",
+                "⚠️ OpenCode error: timed out after 300s",
+                content_type="text",
+            )
         except Exception as e:
             logger.error("OpenCode process error: %s", e, exc_info=True)
             self._last_error = f"{type(e).__name__}: {e}"
@@ -165,7 +179,9 @@ class OpenCodeSubprocessDriver:
 
         logger.info(
             "OpenCode: launching %s %s (session=%s)",
-            self._cmd, " ".join(args[:6]) + "...", self._session_id or "new",
+            self._cmd,
+            " ".join(args[:6]) + "...",
+            self._session_id or "new",
         )
 
         env = {**os.environ}
@@ -173,7 +189,8 @@ class OpenCodeSubprocessDriver:
         env.setdefault("HOME", str(Path.home()))
 
         proc = await asyncio.create_subprocess_exec(
-            self._cmd, *args,
+            self._cmd,
+            *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._work_dir,
@@ -214,13 +231,19 @@ class OpenCodeSubprocessDriver:
             stderr_text = stderr_bytes.decode().strip()
             logger.error(
                 "OpenCode: process exited with code %d, stderr=%s",
-                proc.returncode, stderr_text[:300],
+                proc.returncode,
+                stderr_text[:300],
+                exc_info=True,
             )
             if stderr_text and not collected_text:
                 self._last_error = stderr_text[:200]
-                self._append_output("assistant", f"⚠️ OpenCode error: {stderr_text[:200]}")
+                self._append_output(
+                    "assistant", f"⚠️ OpenCode error: {stderr_text[:200]}"
+                )
         elif not collected_text:
-            logger.warning("OpenCode: process exited successfully but produced no text output")
+            logger.warning(
+                "OpenCode: process exited successfully but produced no text output"
+            )
 
         self._current_proc = None
         self._save_state()
@@ -234,7 +257,9 @@ class OpenCodeSubprocessDriver:
             part = event.get("part", {})
             sid = part.get("sessionID", "")
             if sid and sid != self._session_id:
-                logger.info("OpenCode: session_id updated: %s → %s", self._session_id, sid)
+                logger.info(
+                    "OpenCode: session_id updated: %s → %s", self._session_id, sid
+                )
                 self._session_id = sid
 
         elif event_type == "text":
@@ -277,7 +302,9 @@ class OpenCodeSubprocessDriver:
             error_msg = event.get("error", str(event))
             logger.error("OpenCode event error: %s", error_msg)
             self._last_error = str(error_msg)[:200]
-            self._append_output("assistant", f"⚠️ Error: {error_msg}", content_type="text")
+            self._append_output(
+                "assistant", f"⚠️ Error: {error_msg}", content_type="text"
+            )
 
         elif event_type == "step_finish":
             part = event.get("part", {})
@@ -285,16 +312,15 @@ class OpenCodeSubprocessDriver:
             tokens = part.get("tokens", {})
             logger.info(
                 "OpenCode: step_finish cost=%.4f tokens=%s",
-                cost, json.dumps(tokens) if tokens else "?",
+                cost,
+                json.dumps(tokens) if tokens else "?",
             )
 
     # ------------------------------------------------------------------
     # Output buffer
     # ------------------------------------------------------------------
 
-    def _append_output(
-        self, role: str, text: str, content_type: str = "text"
-    ):
+    def _append_output(self, role: str, text: str, content_type: str = "text"):
         """Append a message to the output buffer."""
         msg = {
             "role": role,
@@ -332,8 +358,6 @@ class OpenCodeSubprocessDriver:
                 data = json.loads(self._state_file.read_text())
                 self._session_id = data.get("session_id", "")
                 if self._session_id:
-                    logger.info(
-                        "OpenCode: restored session_id=%s", self._session_id
-                    )
+                    logger.info("OpenCode: restored session_id=%s", self._session_id)
         except (OSError, json.JSONDecodeError) as e:
             logger.error("Failed to load opencode state: %s", e, exc_info=True)

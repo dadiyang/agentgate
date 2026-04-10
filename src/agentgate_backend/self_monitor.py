@@ -209,7 +209,11 @@ class SelfMonitor:
                     return sid if sid else None
             return None
         except (json.JSONDecodeError, OSError) as e:
-            logger.warning("SelfMonitor: failed to read session map for window '%s': %s", window_name, e)
+            logger.warning(
+                "SelfMonitor: failed to read session map for window '%s': %s",
+                window_name,
+                e,
+            )
             return None
 
     def _get_session_id_by_window_id(self, window_id: str) -> str | None:
@@ -228,7 +232,11 @@ class SelfMonitor:
             sid = info.get("session_id", "")
             return sid if sid else None
         except (json.JSONDecodeError, OSError) as e:
-            logger.warning("SelfMonitor: failed to read session map for window_id '%s': %s", window_id, e)
+            logger.warning(
+                "SelfMonitor: failed to read session map for window_id '%s': %s",
+                window_id,
+                e,
+            )
             return None
 
     def _build_restart_command(self, window_id: str, window_name: str) -> str:
@@ -251,14 +259,17 @@ class SelfMonitor:
         if session_id:
             logger.info(
                 "SelfMonitor: using --resume %s for window %s (%s)",
-                session_id, window_id, window_name,
+                session_id,
+                window_id,
+                window_name,
             )
             return f"{base} --resume {session_id}"
 
         logger.info(
             "SelfMonitor: no session_id in session_map for window %s (%s), "
             "falling back to --continue",
-            window_id, window_name,
+            window_id,
+            window_name,
         )
         return f"{base} --continue"
 
@@ -315,13 +326,20 @@ class SelfMonitor:
                             entry["pane_snippet"] = "\n".join(tail[-5:])
                             break
             except Exception as e:
-                logger.error("SelfMonitor: pane capture failed for %s: %s", w.window_id, e, exc_info=True)
+                logger.error(
+                    "SelfMonitor: pane capture failed for %s: %s",
+                    w.window_id,
+                    e,
+                    exc_info=True,
+                )
 
             results[w.window_id] = entry
 
         return results
 
-    async def _send_alert(self, alert_type: str, severity: str, title: str, detail: str = "") -> None:
+    async def _send_alert(
+        self, alert_type: str, severity: str, title: str, detail: str = ""
+    ) -> None:
         """Send alert via configured callback, or log-only."""
         if self._alert_fn:
             try:
@@ -359,7 +377,9 @@ class SelfMonitor:
             logger.info("SelfMonitor: sent restart commands to window %s", wid)
             return True
         except Exception as e:
-            logger.error("SelfMonitor: failed to restart claude in %s: %s", wid, e, exc_info=True)
+            logger.error(
+                "SelfMonitor: failed to restart claude in %s: %s", wid, e, exc_info=True
+            )
             return False
 
     async def _verify_restart(self, wid: str, timeout: int = 30) -> bool:
@@ -375,7 +395,10 @@ class SelfMonitor:
             try:
                 windows = await self._tmux.list_windows()
                 for w in windows:
-                    if w.window_id == wid and w.pane_current_command == expected_process:
+                    if (
+                        w.window_id == wid
+                        and w.pane_current_command == expected_process
+                    ):
                         return True
             except Exception as e:
                 logger.warning("SelfMonitor: verify_restart list_windows failed: %s", e)
@@ -403,20 +426,30 @@ class SelfMonitor:
 
             # Find child process (claude) of the shell
             r = await asyncio.to_thread(
-                _sp.run, ["pgrep", "-P", shell_pid],
-                capture_output=True, text=True, timeout=5,
+                _sp.run,
+                ["pgrep", "-P", shell_pid],
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if r.returncode != 0 or not r.stdout.strip():
                 return False
 
             child_pid = r.stdout.strip().splitlines()[0]
             await asyncio.to_thread(
-                _sp.run, ["kill", child_pid], check=False, timeout=5,
+                _sp.run,
+                ["kill", child_pid],
+                check=False,
+                timeout=5,
             )
-            logger.info("SelfMonitor: sent SIGTERM to PID %s (window %s)", child_pid, wid)
+            logger.info(
+                "SelfMonitor: sent SIGTERM to PID %s (window %s)", child_pid, wid
+            )
             return True
         except Exception as e:
-            logger.error("SelfMonitor: failed to kill claude in %s: %s", wid, e, exc_info=True)
+            logger.error(
+                "SelfMonitor: failed to kill claude in %s: %s", wid, e, exc_info=True
+            )
             return False
 
     async def _is_session_not_found(self, wid: str) -> bool:
@@ -426,13 +459,16 @@ class SelfMonitor:
             if pane_text and "no conversation found" in pane_text.lower():
                 return True
         except Exception as e:
-            logger.error("SelfMonitor: pane capture error in session check: %s", e, exc_info=True)
+            logger.error(
+                "SelfMonitor: pane capture error in session check: %s", e, exc_info=True
+            )
             return True  # Conservative: assume session not found to avoid infinite loop
         return False
 
     def _clear_session_id(self, wid: str, window_name: str) -> None:
         """Remove stale session_id from session_map.json so next restart falls back to --continue."""
         import fcntl
+
         session_map_file = _backend_config.session_map_file
         if not session_map_file.exists():
             return
@@ -463,12 +499,16 @@ class SelfMonitor:
                         logger.warning(
                             "SelfMonitor: cleared stale session_id (was %s) for window %s (%s) — "
                             "next restart will use --continue",
-                            old_sid, wid, window_name,
+                            old_sid,
+                            wid,
+                            window_name,
                         )
                 finally:
                     fcntl.flock(lock_f, fcntl.LOCK_UN)
         except (json.JSONDecodeError, OSError) as e:
-            logger.error("SelfMonitor: failed to clear session_id: %s", e)
+            logger.error(
+                "SelfMonitor: failed to clear session_id: %s", e, exc_info=True
+            )
 
     async def _handle_dead(self, wid: str, info: dict[str, Any]) -> None:
         """Handle a dead claude process based on config.on_claude_dead."""
@@ -480,7 +520,8 @@ class SelfMonitor:
 
         if action == "notify":
             await self._send_alert(
-                "claude_process_dead", "CRITICAL",
+                "claude_process_dead",
+                "CRITICAL",
                 f"Claude 进程已死亡: {info.get('window_name', wid)}",
                 info.get("detail", ""),
             )
@@ -520,7 +561,8 @@ class SelfMonitor:
 
         severity = "INFO" if "验证成功" in note else "CRITICAL"
         await self._send_alert(
-            "claude_process_dead", severity,
+            "claude_process_dead",
+            severity,
             f"Claude 进程已死亡 — {note}: {info.get('window_name', wid)}",
             info.get("detail", ""),
         )
@@ -541,7 +583,8 @@ class SelfMonitor:
 
         if action == "notify":
             await self._send_alert(
-                "claude_degraded", "CRITICAL",
+                "claude_degraded",
+                "CRITICAL",
                 f"Claude API 异常: {reason} ({info.get('window_name', wid)})",
                 f"连续 {count} 次检测到异常\n\nPane 末尾:\n{snippet}",
             )
@@ -574,7 +617,8 @@ class SelfMonitor:
 
             severity = "INFO" if "验证成功" in note else "CRITICAL"
             await self._send_alert(
-                "claude_degraded", severity,
+                "claude_degraded",
+                severity,
                 f"Claude API 异常: {reason} — {note}: {info.get('window_name', wid)}",
                 f"连续 {count} 次检测到异常\n\nPane 末尾:\n{snippet}",
             )
@@ -586,7 +630,8 @@ class SelfMonitor:
         self._consecutive_degraded[wid] = 0
 
         await self._send_alert(
-            "claude_process_recovered", "INFO",
+            "claude_process_recovered",
+            "INFO",
             f"Claude 进程已恢复: {info.get('window_name', wid)}",
             info.get("detail", ""),
         )
@@ -605,13 +650,19 @@ class SelfMonitor:
                 self._prev_alive[wid] = False
 
             elif status == "degraded":
-                self._consecutive_degraded[wid] = self._consecutive_degraded.get(wid, 0) + 1
+                self._consecutive_degraded[wid] = (
+                    self._consecutive_degraded.get(wid, 0) + 1
+                )
                 await self._handle_degraded(wid, info)
                 self._prev_alive[wid] = True  # process is alive but degraded
 
             elif status == "ok":
                 # Check for recovery from dead or degraded
-                if prev_alive is False or self._consecutive_degraded.get(wid, 0) >= self._config.degraded_threshold:
+                if (
+                    prev_alive is False
+                    or self._consecutive_degraded.get(wid, 0)
+                    >= self._config.degraded_threshold
+                ):
                     await self._handle_recovery(wid, info)
                 self._consecutive_degraded[wid] = 0
                 self._prev_alive[wid] = True

@@ -45,7 +45,11 @@ def _check_auth(request: web.Request, api_token: str) -> web.Response | None:
     auth = request.headers.get("Authorization", "")
     if not auth:
         return web.json_response(
-            {"ok": False, "error": "unauthorized", "msg": "Missing Authorization header"},
+            {
+                "ok": False,
+                "error": "unauthorized",
+                "msg": "Missing Authorization header",
+            },
             status=401,
         )
     if auth != f"Bearer {api_token}":
@@ -82,26 +86,30 @@ def create_app(
         for w in windows:
             ws = session_manager.window_states.get(w.window_id)
             sid = ws.session_id if ws else ""
-            window_list.append({
-                "window_id": w.window_id,
-                "window_name": w.window_name,
-                "pane_command": getattr(w, "pane_current_command", "unknown"),
-                "session_id": sid,
-                "pending_deliveries": tracker.pending_count(w.window_id),
-            })
+            window_list.append(
+                {
+                    "window_id": w.window_id,
+                    "window_name": w.window_name,
+                    "pane_command": getattr(w, "pane_current_command", "unknown"),
+                    "session_id": sid,
+                    "pending_deliveries": tracker.pending_count(w.window_id),
+                }
+            )
 
         watchdog_enabled = self_monitor is not None
         window_health: dict = {}
         if self_monitor is not None:
             window_health = self_monitor.window_statuses
 
-        return web.json_response({
-            "status": "ok",
-            "windows": window_list,
-            "uptime_seconds": int(time.monotonic() - _startup_time),
-            "watchdog_enabled": watchdog_enabled,
-            "window_health": window_health,
-        })
+        return web.json_response(
+            {
+                "status": "ok",
+                "windows": window_list,
+                "uptime_seconds": int(time.monotonic() - _startup_time),
+                "watchdog_enabled": watchdog_enabled,
+                "window_health": window_health,
+            }
+        )
 
     async def inject_handler(request: web.Request) -> web.Response:
         err = _check_auth(request, api_token)
@@ -111,7 +119,11 @@ def create_app(
         try:
             body = await request.json()
         except Exception:
-            logger.warning("inject_handler: invalid JSON body from %s", request.remote)
+            logger.warning(
+                "inject_handler: invalid JSON body from %s",
+                request.remote,
+                exc_info=True,
+            )
             return web.json_response(
                 {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
                 status=400,
@@ -124,7 +136,11 @@ def create_app(
 
         if not window_name or not text:
             return web.json_response(
-                {"ok": False, "error": "bad_request", "msg": "window_name and text required"},
+                {
+                    "ok": False,
+                    "error": "bad_request",
+                    "msg": "window_name and text required",
+                },
                 status=400,
             )
 
@@ -133,19 +149,24 @@ def create_app(
             logger.info(
                 "HTTP inject: duplicate message_id=%s, skipping send_keys", message_id
             )
-            return web.json_response({
-                "ok": True,
-                "duplicate": True,
-                "message_id": message_id,
-                "msg": "Duplicate message_id — already injected",
-            })
+            return web.json_response(
+                {
+                    "ok": True,
+                    "duplicate": True,
+                    "message_id": message_id,
+                    "msg": "Duplicate message_id — already injected",
+                }
+            )
 
         # Find window by name
         window = await tmux_manager.find_window_by_name(window_name)
         if not window:
             return web.json_response(
-                {"ok": False, "error": "window_not_found",
-                 "msg": f"Window '{window_name}' not found"},
+                {
+                    "ok": False,
+                    "error": "window_not_found",
+                    "msg": f"Window '{window_name}' not found",
+                },
                 status=404,
             )
 
@@ -155,14 +176,21 @@ def create_app(
         if self_monitor is not None:
             ws = self_monitor.window_statuses.get(window.window_id)
             if ws and ws.get("status") in ("dead", "degraded"):
-                reason = ws.get("degraded_reason") or ws.get("detail") or "agent unavailable"
+                reason = (
+                    ws.get("degraded_reason") or ws.get("detail") or "agent unavailable"
+                )
                 logger.warning(
                     "Inject rejected: window %s status=%s reason=%s",
-                    window_name, ws["status"], reason,
+                    window_name,
+                    ws["status"],
+                    reason,
                 )
                 return web.json_response(
-                    {"ok": False, "error": "agent_unavailable",
-                     "msg": f"Agent not ready: {reason}"},
+                    {
+                        "ok": False,
+                        "error": "agent_unavailable",
+                        "msg": f"Agent not ready: {reason}",
+                    },
                     status=503,
                 )
 
@@ -192,16 +220,21 @@ def create_app(
 
         logger.info(
             "HTTP inject: window=%s delivery=%s message_id=%s len=%d",
-            window_name, delivery_id or "untracked", message_id or "none", len(text),
+            window_name,
+            delivery_id or "untracked",
+            message_id or "none",
+            len(text),
         )
 
-        return web.json_response({
-            "ok": True,
-            "delivery_id": delivery_id,
-            "window_id": window.window_id,
-            "message_id": message_id or None,
-            "msg": msg,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "delivery_id": delivery_id,
+                "window_id": window.window_id,
+                "message_id": message_id or None,
+                "msg": msg,
+            }
+        )
 
     async def delivery_handler(request: web.Request) -> web.Response:
         err = _check_auth(request, api_token)
@@ -233,8 +266,11 @@ def create_app(
         window = await tmux_manager.find_window_by_name(window_name)
         if not window:
             return web.json_response(
-                {"ok": False, "error": "window_not_found",
-                 "msg": f"Window '{window_name}' not found"},
+                {
+                    "ok": False,
+                    "error": "window_not_found",
+                    "msg": f"Window '{window_name}' not found",
+                },
                 status=404,
             )
 
@@ -242,7 +278,8 @@ def create_app(
         await session_manager.load_session_map()
 
         messages, count = await session_manager.get_recent_messages(
-            window.window_id, start_byte=since,
+            window.window_id,
+            start_byte=since,
         )
 
         session = await session_manager.resolve_session_for_window(window.window_id)
@@ -254,15 +291,17 @@ def create_app(
                 logger.warning("output_handler: stat failed for session file: %s", e)
                 pass
 
-        return web.json_response({
-            "ok": True,
-            "window_name": window_name,
-            "window_id": window.window_id,
-            "messages": messages,
-            "count": count,
-            "since": since,
-            "next_offset": next_offset,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "window_name": window_name,
+                "window_id": window.window_id,
+                "messages": messages,
+                "count": count,
+                "since": since,
+                "next_offset": next_offset,
+            }
+        )
 
     async def window_create_handler(request: web.Request) -> web.Response:
         """Create a new tmux window and start Claude Code.
@@ -277,7 +316,11 @@ def create_app(
         try:
             body = await request.json()
         except Exception:
-            logger.warning("window_create_handler: invalid JSON body from %s", request.remote, exc_info=True)
+            logger.warning(
+                "window_create_handler: invalid JSON body from %s",
+                request.remote,
+                exc_info=True,
+            )
             return web.json_response(
                 {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
                 status=400,
@@ -307,16 +350,20 @@ def create_app(
 
         logger.info(
             "HTTP window create: name=%s id=%s dir=%s",
-            final_name, window_id, work_dir,
+            final_name,
+            window_id,
+            work_dir,
         )
 
-        return web.json_response({
-            "ok": True,
-            "window_name": final_name,
-            "window_id": window_id,
-            "work_dir": work_dir,
-            "msg": msg,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "window_name": final_name,
+                "window_id": window_id,
+                "work_dir": work_dir,
+                "msg": msg,
+            }
+        )
 
     async def confirm_processed_handler(request: web.Request) -> web.Response:
         """Gateway calls this to confirm messages were processed by the agent.
@@ -337,7 +384,11 @@ def create_app(
         try:
             body = await request.json()
         except Exception:
-            logger.warning("confirm_processed_handler: invalid JSON body from %s", request.remote, exc_info=True)
+            logger.warning(
+                "confirm_processed_handler: invalid JSON body from %s",
+                request.remote,
+                exc_info=True,
+            )
             return web.json_response(
                 {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
                 status=400,
@@ -352,7 +403,11 @@ def create_app(
 
         if not message_ids:
             return web.json_response(
-                {"ok": False, "error": "bad_request", "msg": "message_ids (list) or message_id (string) required"},
+                {
+                    "ok": False,
+                    "error": "bad_request",
+                    "msg": "message_ids (list) or message_id (string) required",
+                },
                 status=400,
             )
 
@@ -364,14 +419,17 @@ def create_app(
 
         logger.info(
             "confirm_processed: message_ids=%s confirmed=%d",
-            message_ids, confirmed,
+            message_ids,
+            confirmed,
         )
 
-        return web.json_response({
-            "ok": True,
-            "confirmed": confirmed,
-            "message_ids": message_ids,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "confirmed": confirmed,
+                "message_ids": message_ids,
+            }
+        )
 
     async def unprocessed_handler(request: web.Request) -> web.Response:
         """Return messages that were injected but not yet confirmed as processed.
@@ -386,11 +444,13 @@ def create_app(
             return err
 
         items = list(_unprocessed.values())
-        return web.json_response({
-            "ok": True,
-            "count": len(items),
-            "unprocessed": items,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "count": len(items),
+                "unprocessed": items,
+            }
+        )
 
     app = web.Application()
     app.router.add_get("/api/health", health_handler)
@@ -451,20 +511,24 @@ def create_opencode_app(
         if err:
             return err
         health = driver.get_health()
-        return web.json_response({
-            "status": "ok",
-            "windows": [{
-                "window_id": "opencode",
-                "window_name": "opencode",
-                "pane_command": "opencode",
-                "session_id": health.get("session_id", ""),
-                "pending_deliveries": health.get("queue_size", 0),
-            }],
-            "uptime_seconds": int(time.monotonic() - _startup_time),
-            "watchdog_enabled": False,
-            "window_health": {},
-            "opencode": health,
-        })
+        return web.json_response(
+            {
+                "status": "ok",
+                "windows": [
+                    {
+                        "window_id": "opencode",
+                        "window_name": "opencode",
+                        "pane_command": "opencode",
+                        "session_id": health.get("session_id", ""),
+                        "pending_deliveries": health.get("queue_size", 0),
+                    }
+                ],
+                "uptime_seconds": int(time.monotonic() - _startup_time),
+                "watchdog_enabled": False,
+                "window_health": {},
+                "opencode": health,
+            }
+        )
 
     async def inject_handler(request: web.Request) -> web.Response:
         err = _check_auth(request, api_token)
@@ -473,7 +537,11 @@ def create_opencode_app(
         try:
             body = await request.json()
         except Exception:
-            logger.warning("opencode inject_handler: invalid JSON body from %s", request.remote, exc_info=True)
+            logger.warning(
+                "opencode inject_handler: invalid JSON body from %s",
+                request.remote,
+                exc_info=True,
+            )
             return web.json_response(
                 {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
                 status=400,
@@ -491,16 +559,20 @@ def create_opencode_app(
 
         logger.info(
             "HTTP inject (opencode): message_id=%s len=%d queued=%s",
-            message_id or "none", len(text), result.get("queued", False),
+            message_id or "none",
+            len(text),
+            result.get("queued", False),
         )
 
-        return web.json_response({
-            "ok": True,
-            "delivery_id": message_id or None,
-            "window_id": "opencode",
-            "message_id": message_id or None,
-            "msg": "Injected" if not result.get("queued") else "Queued",
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "delivery_id": message_id or None,
+                "window_id": "opencode",
+                "message_id": message_id or None,
+                "msg": "Injected" if not result.get("queued") else "Queued",
+            }
+        )
 
     async def output_handler(request: web.Request) -> web.Response:
         err = _check_auth(request, api_token)
@@ -536,7 +608,9 @@ async def start_server_opencode(
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
-    logger.info("HTTP inject server (opencode-subprocess) started on 127.0.0.1:%d", port)
+    logger.info(
+        "HTTP inject server (opencode-subprocess) started on 127.0.0.1:%d", port
+    )
     return runner
 
 
@@ -569,21 +643,25 @@ def create_driver_app(
             try:
                 windows = await tmux_manager.list_windows()
                 for w in windows:
-                    window_list.append({
-                        "window_id": w.window_id,
-                        "window_name": w.window_name,
-                        "pane_command": w.pane_current_command,
-                    })
+                    window_list.append(
+                        {
+                            "window_id": w.window_id,
+                            "window_name": w.window_name,
+                            "pane_command": w.pane_current_command,
+                        }
+                    )
             except Exception as e:
                 logger.error("health: list_windows failed: %s", e, exc_info=True)
 
-        return web.json_response({
-            "status": "ok",
-            "windows": window_list,
-            "uptime_seconds": int(time.monotonic() - _startup_time),
-            "watchdog_enabled": True,
-            "window_health": {},
-        })
+        return web.json_response(
+            {
+                "status": "ok",
+                "windows": window_list,
+                "uptime_seconds": int(time.monotonic() - _startup_time),
+                "watchdog_enabled": True,
+                "window_health": {},
+            }
+        )
 
     async def inject_handler(request: web.Request) -> web.Response:
         err = _check_auth(request, api_token)
@@ -592,7 +670,11 @@ def create_driver_app(
         try:
             body = await request.json()
         except Exception:
-            logger.warning("driver inject_handler: invalid JSON body from %s", request.remote, exc_info=True)
+            logger.warning(
+                "driver inject_handler: invalid JSON body from %s",
+                request.remote,
+                exc_info=True,
+            )
             return web.json_response(
                 {"ok": False, "error": "bad_request", "msg": "Invalid JSON"},
                 status=400,
@@ -610,10 +692,14 @@ def create_driver_app(
             )
 
         if message_id and message_store.has(message_id):
-            return web.json_response({
-                "ok": True, "duplicate": True, "message_id": message_id,
-                "msg": "Duplicate message_id — already injected",
-            })
+            return web.json_response(
+                {
+                    "ok": True,
+                    "duplicate": True,
+                    "message_id": message_id,
+                    "msg": "Duplicate message_id — already injected",
+                }
+            )
 
         # Inject via driver (tmux send_keys, subprocess stdin, or whatever)
         success, msg = await driver.inject(window_name, text)
@@ -632,13 +718,20 @@ def create_driver_app(
 
         logger.info(
             "HTTP inject: window=%s delivery=%s message_id=%s len=%d",
-            window_name, delivery_id or "untracked", message_id or "none", len(text),
+            window_name,
+            delivery_id or "untracked",
+            message_id or "none",
+            len(text),
         )
-        return web.json_response({
-            "ok": True, "delivery_id": delivery_id,
-            "window_id": window_name,
-            "message_id": message_id or None, "msg": msg,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "delivery_id": delivery_id,
+                "window_id": window_name,
+                "message_id": message_id or None,
+                "msg": msg,
+            }
+        )
 
     async def output_handler(request: web.Request) -> web.Response:
         err = _check_auth(request, api_token)
@@ -649,15 +742,17 @@ def create_driver_app(
 
         result = await driver.read_output(window_name, since)
 
-        return web.json_response({
-            "ok": True,
-            "window_name": window_name,
-            "window_id": window_name,
-            "messages": result.messages,
-            "count": result.count,
-            "since": since,
-            "next_offset": result.cursor,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "window_name": window_name,
+                "window_id": window_name,
+                "messages": result.messages,
+                "count": result.count,
+                "since": since,
+                "next_offset": result.cursor,
+            }
+        )
 
     app = web.Application()
     app.router.add_get("/api/health", health_handler)
