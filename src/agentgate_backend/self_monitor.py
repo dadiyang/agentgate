@@ -409,15 +409,20 @@ class SelfMonitor:
         import subprocess as _sp
 
         try:
-            # Get the pane's shell PID
-            session = self._tmux.get_session()
-            if not session:
-                return False
-
-            windows = session.windows.filter(window_id=wid)
+            # Get all windows and filter by window_id
+            windows = await self._tmux.list_windows()
             if not windows:
                 return False
-            window = windows[0]
+
+            target_window = None
+            for w in windows:
+                if str(w.window_id) == wid:
+                    target_window = w
+                    break
+
+            if not target_window:
+                return False
+            window = target_window
 
             pane = window.active_pane
             if not pane:
