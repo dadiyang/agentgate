@@ -63,6 +63,24 @@ EOF
 | `AGENTGATE_WORK_DIR` | Agent 的工作目录 |
 | `AGENTGATE_AGENT_TYPE` | `claude-code` 或 `opencode` |
 | `AGENTGATE_AGENT_MODE` | `tmux`（持久会话）或 `subprocess`（stdin/stdout） |
+| `AGENTGATE_PROCESS_NAME` | SelfMonitor 检测进程存活的名称（见下方说明） |
+
+**`AGENTGATE_PROCESS_NAME`** 控制 SelfMonitor 如何检测 Agent 是否存活。它必须与 tmux 报告中 pane 的前台进程匹配（`pane_current_command`）。如果不匹配，SelfMonitor 会认为 Agent 已死并不断重启它。
+
+按 Agent 类型自动推导的默认值（通常无需设置）：
+
+| Agent 类型 | 默认值 | 原因 |
+|------------|--------|------|
+| `claude-code` | `claude` | Claude Code 二进制文件 |
+| `opencode` | `node` | npm 安装的 OpenCode 作为 Node.js 进程运行 |
+
+需要时覆盖——例如原生编译的 OpenCode 二进制在 tmux 中显示为 `opencode` 而非 `node`：
+
+```bash
+AGENTGATE_PROCESS_NAME=opencode
+```
+
+检查 tmux 实际报告：`tmux list-windows -F '#{window_name} #{pane_current_command}'`
 
 OpenCode + 本地模型的配置：
 
@@ -93,14 +111,25 @@ channels:
         bot_token: "123456:ABC-DEF..."
         proxy: "http://127.0.0.1:7897"   # 可选，国内服务器需要
 
+  dingtalk:
+    bots:
+      - client_id: your_client_id
+        client_secret: your_client_secret
+        bot_id: your_bot_id
+
 routes:
   - channel: telegram
     bot_id: my_bot
     chat_id: "7003732745"       # 用户或群组的 chat ID
     backend: my-agent
+
+  - channel: dingtalk
+    bot_id: your_client_id      # DingTalk 使用 client_id 作为 bot_id
+    chat_id: conversation_id    # DingTalk 的 conversation ID
+    backend: my-agent
 ```
 
-**注意：** `default_window` 必须等于 `WORK_DIR` 的目录名。比如 `WORK_DIR=/home/user/my-project`，则 `default_window: my-project`。不匹配 = 输出永远到不了 IM。
+**重要：** `default_window` 必须等于 `WORK_DIR` 的目录名。比如 `WORK_DIR=/home/user/my-project`，则 `default_window: my-project`。不匹配 = 输出永远到不了 IM。
 
 ### 3. 启动
 
@@ -127,17 +156,44 @@ sudo systemctl enable --now agentgate-backend@my-agent
 sudo systemctl enable --now agentgate-gateway
 ```
 
-### 4. 验证
+### 4. 连接 IM 前验证
+
+**在发送任何真实消息前做这个。** 配置错误的后端会在每条 incoming 消息上消耗 token，或触发重启循环。趁网关还没路由消息给它时修复问题。
 
 ```bash
-# 检查后端健康
+# 步骤 1：检查后端健康 API
 curl http://127.0.0.1:8903/api/health -H "Authorization: Bearer my-secret-token"
 
-# 检查网关健康
+# 步骤 2：检查 Agent 进程名与配置匹配
+tmux list-windows -t agentgate-my-agent -F '#{window_name} #{pane_current_command}'
+# 预期输出示例：
+#   __main__ claude        ← Claude Code 后端
+#   __main__ node          ← OpenCode (npm install)
+#   __main__ opencode      ← OpenCode (原生二进制)
+# 如果 pane_current_command 不匹配 AGENTGATE_PROCESS_NAME，
+# SelfMonitor 会认为 Agent 已死并不断重启它。
+
+# 步骤 3：检查网关健康和路由配置
 curl http://127.0.0.1:8800/api/health
 ```
 
-在 Telegram 里发条消息，Agent 收到、处理、回复出现在同一个聊天里。
+**"正确"的样子：**
+- 健康 API 返回 `200`，Agent 状态为 `ok`
+- `pane_current_command` 匹配 `AGENTGATE_PROCESS_NAME`（或自动推导的默认值）
+- 网关显示后端为 `healthy`
+
+**如果有问题——先停止后端，再修复：**
+
+```bash
+# 立即停止后端，防止重启循环或 IM 消息消耗 token
+sudo systemctl stop agentgate-backend@my-agent
+# 或：手动杀死 agentgate-backend 进程
+
+# 按需修复 .env / 网关配置 / tmux session，然后重启
+sudo systemctl start agentgate-backend@my-agent
+```
+
+所有检查通过后，在 IM 聊天里发测试消息确认端到端送达。
 
 ### 纯 HTTP 模式（不需要 IM）
 
@@ -309,13 +365,19 @@ curl -X POST http://localhost:8800/api/messages/query \
 ### 实例生命周期
 
 ```bash
-# 创建新实例（自动分配端口、生成 token）
+# 创建新后端实例（自动分配端口、生成 token）
 agentgate-ctl create my-agent --work-dir ~/my-project --channel telegram --chat-id "7003732745"
+
+# 带 DingTalk 通道
+agentgate-ctl create my-dingtalk --work-dir ~/my-project --channel dingtalk --chat-id "conversation_id" --bot-id "client_id"
+
+# 带 Qoder agent
+agentgate-ctl create my-qoder --work-dir ~/qoder-project --agent-type qoder
 
 # 列出所有实例
 agentgate-ctl list
 
-# 状态 / 启动 / 停止 / 重启 / 删除
+# 实例状态 / 启动 / 停止 / 重启 / 删除
 agentgate-ctl status my-agent
 agentgate-ctl stop my-agent
 agentgate-ctl start my-agent
@@ -332,13 +394,13 @@ agentgate-ctl send my-agent "重构 auth 模块"
 # 从 stdin 读（适合长内容）
 echo "详细指令..." | agentgate-ctl send my-agent -
 
-# 列出所有可发送的目标
+# 列出所有可用后端
 agentgate-ctl send --list
 
-# 查看所有后端健康状态
+# 所有后端健康概览
 agentgate-ctl send --status
 
-# 带发送者名称
+# 带发送者名称（用于消息信封）
 agentgate-ctl send --from dev my-qa-agent "请验证修复"
 ```
 
@@ -395,6 +457,13 @@ AGENTGATE_OPENCODE_MODEL=local/Qwen3.5-35B
 AGENTGATE_PROCESS_NAME=node
 ```
 
+或通过 CLI：
+
+```bash
+agentgate-ctl create local-llm --work-dir ~/my-workspace
+# 然后编辑 ~/.agentgate/backends/local-llm/.env 设置 agent_type/mode/model
+```
+
 AgentGate 自动配置 OpenCode 权限——所有工具允许，交互式提示（AskUser）禁用（无法通过 IM 回答）。
 
 ### 4. 项目级模型覆盖
@@ -437,7 +506,7 @@ AgentGate 自动配置 OpenCode 权限——所有工具允许，交互式提示
 
 ### Agent 回复没到达 IM
 
-每条日志都包含 trace ID（`[traceID]`），可跨服务关联：
+检查输出管道的日志。每条日志都包含 trace ID（`[traceID]`），用于跨服务关联：
 
 ```bash
 # 按 backend 查——看某个 agent 的所有活动
