@@ -2,7 +2,7 @@
 
 **把 IM 和 HTTP 变成 CLI AI Agent 的控制通道。**
 
-在飞书或 Telegram 里发一条消息，Agent 就收到了。调一个 HTTP 接口，Agent 也收到了。Agent 有输出，直接推到你的聊天窗口或 API 响应里。不需要开终端。
+在飞书、Telegram 或钉钉里发一条消息，Agent 就收到了。调一个 HTTP 接口，Agent 也收到了。Agent 有输出，直接推到你的聊天窗口或 API 响应里。不需要开终端。
 
 [English](README.md)
 
@@ -13,8 +13,8 @@
 AgentGate 架在你的 IM / HTTP 客户端和 CLI Agent（Claude Code、OpenCode 等）之间：
 
 ```
-飞书 / Telegram / HTTP  →  AgentGate 网关  →  Agent 后端  →  CLI Agent
-                        ←  （输出推回）      ←              ←
+飞书 / Telegram / 钉钉 / HTTP  →  AgentGate 网关  →  Agent 后端  →  CLI Agent
+                               ←  （输出推回）      ←              ←
 ```
 
 **对终端用户：** 在 IM 群里 @ 机器人发消息，Agent 处理完回复出现在同一个群里。跟找同事聊天一样自然。
