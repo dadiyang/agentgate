@@ -105,7 +105,7 @@ class GatewayAPI:
             text=text,
             dedup_key=dedup_key,
             target_backend_id=backend_id,
-            message_id=message_id,
+            action_id=message_id,
             fire_and_forget=True,
         )
         elapsed_ms = (time.monotonic() - t0) * 1000

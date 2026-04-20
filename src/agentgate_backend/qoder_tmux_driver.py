@@ -46,11 +46,13 @@ class QoderTmuxDriver:
         qoder_command: str = "qodercli",
         work_dir: str = "",
         model: str = "",
+        yolo: bool = False,
     ):
         self._tmux = tmux_manager
         self._command = qoder_command
         self._work_dir = work_dir
         self._model = model
+        self._yolo = yolo
 
         # Cached current session file — refreshed lazily
         self._session_file: Path | None = None
@@ -62,6 +64,8 @@ class QoderTmuxDriver:
         cmd = self._command
         if self._model:
             cmd += f" --model {self._model}"
+        if self._yolo:
+            cmd += " --yolo"
         return cmd
 
     def build_recovery_command(self, window_id: str) -> str:
@@ -69,9 +73,13 @@ class QoderTmuxDriver:
         session_file = self._find_latest_session()
         if session_file:
             sid = session_file.stem
-            logger.info("Qoder tmux: recovery --resume %s for window %s", sid, window_id)
+            logger.info(
+                "Qoder tmux: recovery --resume %s for window %s", sid, window_id
+            )
             return f"{self._command} -r {sid}"
-        logger.info("Qoder tmux: no session found, starting fresh for window %s", window_id)
+        logger.info(
+            "Qoder tmux: no session found, starting fresh for window %s", window_id
+        )
         return self._command
 
     async def accept_startup_prompts(self, window_id: str) -> bool:
@@ -83,7 +91,9 @@ class QoderTmuxDriver:
         window = await self._tmux.find_window_by_name(window_name)
         if not window:
             return False, f"Window '{window_name}' not found"
-        ok = await self._tmux.send_keys(window.window_id, text, enter=True, literal=True)
+        ok = await self._tmux.send_keys(
+            window.window_id, text, enter=True, literal=True
+        )
         return ok, "Injected" if ok else "send_keys failed"
 
     async def read_output(self, window_name: str, since: int) -> OutputResult:
@@ -105,7 +115,9 @@ class QoderTmuxDriver:
         try:
             raw = session_file.read_bytes()[since:]
         except OSError as e:
-            logger.error("Qoder tmux: failed to read session file: %s", e, exc_info=True)
+            logger.error(
+                "Qoder tmux: failed to read session file: %s", e, exc_info=True
+            )
             return OutputResult(messages=[], count=0, cursor=since)
 
         messages = []
@@ -116,7 +128,9 @@ class QoderTmuxDriver:
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError as e:
-                logger.warning("Qoder tmux: JSONL parse error: %s | line=%r", e, line[:100])
+                logger.warning(
+                    "Qoder tmux: JSONL parse error: %s | line=%r", e, line[:100]
+                )
                 continue
             parsed = _parse_entry(entry)
             messages.extend(parsed)
@@ -173,6 +187,7 @@ class QoderTmuxDriver:
 
 # --- JSONL parser ---
 
+
 def _parse_entry(entry: dict) -> list[dict]:
     """Parse one Qoder JSONL entry into gateway-compatible message dicts."""
     etype = entry.get("type", "")
@@ -192,7 +207,9 @@ def _parse_entry(entry: dict) -> list[dict]:
         elif ptype == "thinking":
             text = part.get("thinking", "")
             if text:
-                results.append({"role": etype, "text": text, "content_type": "thinking"})
+                results.append(
+                    {"role": etype, "text": text, "content_type": "thinking"}
+                )
         elif ptype == "tool_use":
             name = part.get("name", "unknown")
             inp = part.get("input", {})
