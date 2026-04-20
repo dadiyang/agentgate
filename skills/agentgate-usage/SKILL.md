@@ -21,6 +21,23 @@ IM / HTTP → Gateway (路由+持久化+轮询) → Backend (进程管理+健康
 
 全新机器按此顺序操作：
 
+0. **安装 Python 依赖**（全新机器必做）
+
+   ```bash
+   pip install -e /path/to/agentgate
+   pip install \
+     opentelemetry-api \
+     opentelemetry-sdk \
+     opentelemetry-instrumentation \
+     opentelemetry-instrumentation-dbapi \
+     opentelemetry-instrumentation-httpx \
+     opentelemetry-instrumentation-logging \
+     opentelemetry-instrumentation-sqlite3 \
+     opentelemetry-semantic-conventions
+   ```
+
+   > 这些 OTel 包提供链路追踪能力，未包含在 `pyproject.toml` 的默认依赖中，漏装会导致 traceID 相关日志无输出。
+
 1. `agentgate-ctl create` 创建实例（见[实例管理](#实例管理)）
 2. **注册 CC Stop hook**（新机器必做，否则 session_map 不写入，见 [CC Stop Hook](#cc-stop-hook)）
 3. 编辑 `~/.agentgate/gateway/config.yaml` 加 backend + route（见[配置](#配置)）
