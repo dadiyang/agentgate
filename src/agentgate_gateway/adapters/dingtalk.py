@@ -158,7 +158,7 @@ class DingTalkAdapter(ChannelAdapter):
         finally:
             self._connected = False
 
-    async def _on_bot_message(self, msg: Any) -> None:
+    async def _on_bot_message(self, msg: Any, raw_data: dict | None = None) -> None:
         """Called by _BotMessageHandler for each incoming message."""
         from dingtalk_stream import chatbot
 
@@ -181,7 +181,7 @@ class DingTalkAdapter(ChannelAdapter):
             )
             return
 
-        # Extract text — handle both text and audio messages
+        # Extract text — handle text, audio, and richText messages
         msg_type = msg.message_type or ""
         if msg_type == "audio":
             # DingTalk performs ASR server-side; use the recognition field directly
@@ -203,6 +203,20 @@ class DingTalkAdapter(ChannelAdapter):
                 return
         elif msg_type == "text":
             text = (msg.text.content if msg.text else "") or ""
+        elif msg_type == "richText":
+            # Rich text is an array of {"text": "..."} segments; concatenate them all
+            try:
+                content = (raw_data or {}).get("content", {})
+                segments = content.get("richText", [])
+                text = "".join(seg.get("text", "") for seg in segments)
+            except (AttributeError, TypeError):
+                text = ""
+            if not text.strip():
+                logger.warning(
+                    "DingTalk richText message with no extractable text: message_id=%s",
+                    msg.message_id,
+                )
+                return
         else:
             logger.debug("DingTalk: unsupported message_type=%s, skipping", msg_type)
             return
@@ -266,7 +280,7 @@ class _BotMessageHandler:
             else:
                 data = message.data
             bot_msg = chatbot.ChatbotMessage.from_dict(data)
-            await self._on_message_fn(bot_msg)
+            await self._on_message_fn(bot_msg, data)
         except Exception as e:
             logger.error("DingTalk handler error: %s", e, exc_info=True)
 
