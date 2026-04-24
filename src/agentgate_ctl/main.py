@@ -169,6 +169,74 @@ def _heartbeat_info(name: str) -> dict | None:
         return None
 
 
+def _reload_gateway() -> None:
+    """Hot-reload gateway config via HTTP API. Warns if gateway is unreachable."""
+    config = _load_gateway_config()
+    port = config.get("port", 8800)
+    api_token = config.get("api_token", "")
+    url = f"http://127.0.0.1:{port}/api/admin/reload"
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    import urllib.request as _req
+    r = _req.Request(url, data=b"{}", headers=headers, method="POST")
+    try:
+        with _req.urlopen(r, timeout=10) as resp:
+            data = json.loads(resp.read())
+            click.echo(
+                f"  Gateway reload: routes={data.get('routes', '?')} "
+                f"backends_added={data.get('backends_added', 0)} "
+                f"backends_updated={data.get('backends_updated', 0)}"
+            )
+    except Exception as e:
+        click.echo(
+            f"  Warning: gateway reload HTTP failed ({e}). "
+            "Run: kill -HUP $(pidof agentgate-gateway)",
+            err=True,
+        )
+
+
+def _reset_backend_offset(backend_id: str) -> None:
+    """Reset gateway in-memory + DB poll offset for a backend via HTTP API."""
+    config = _load_gateway_config()
+    port = config.get("port", 8800)
+    api_token = config.get("api_token", "")
+    url = f"http://127.0.0.1:{port}/api/admin/backend/{backend_id}/reset-offset"
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    import urllib.request as _req
+    r = _req.Request(url, data=b"{}", headers=headers, method="POST")
+    try:
+        with _req.urlopen(r, timeout=10) as resp:
+            data = json.loads(resp.read())
+            click.echo(
+                f"  Reset offset '{backend_id}': old_offset={data.get('old_offset', '?')}"
+            )
+    except Exception as e:
+        click.echo(
+            f"  Warning: offset reset for '{backend_id}' failed ({e}). "
+            "Gateway may not be running — offset will auto-seed on next startup.",
+            err=True,
+        )
+
+
+def _clean_db_offset(backend_id: str) -> None:
+    """Delete poll_offsets DB record for a backend (prevents stale offsets on name reuse)."""
+    db_path = AGENTGATE_HOME / "gateway" / "messages.db"
+    if not db_path.exists():
+        return
+    import sqlite3
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("DELETE FROM poll_offsets WHERE backend_id = ?", (backend_id,))
+        conn.commit()
+        conn.close()
+        click.echo(f"  Cleaned DB poll_offset for '{backend_id}'")
+    except sqlite3.OperationalError as e:
+        logger.info("poll_offsets cleanup skipped: %s", e)
+
+
 @click.group()
 def cli():
     """AgentGate instance management CLI."""
@@ -713,6 +781,258 @@ def send(target, message, sender, list_targets, show_status):
         if detail:
             click.echo(f"  {detail[:200]}", err=True)
         sys.exit(1)
+
+
+@cli.command("switch")
+@click.argument("old_backend")
+@click.option(
+    "--workdir",
+    "--work-dir",
+    required=True,
+    type=click.Path(),
+    help="New working directory for the replacement backend",
+)
+@click.option("--new-name", default=None, help="New backend name (default: <old>-new)")
+@click.option(
+    "--agent-type",
+    default=None,
+    type=click.Choice(["claude-code", "opencode", "qoder"]),
+    help="Agent type (default: inherited from old backend)",
+)
+@click.option(
+    "--keep-old",
+    is_flag=True,
+    help="Keep old backend running (only reroute, don't stop/remove)",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would happen without executing")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def switch(old_backend, workdir, new_name, agent_type, keep_old, dry_run, yes):
+    """Switch conversation to a new workspace backend.
+
+    \b
+    Creates a new backend with the given workdir, moves all routes from the old
+    backend to the new one, resets the gateway poll offset, then stops and removes
+    the old backend (unless --keep-old).
+
+    \b
+    Examples:
+      agentgate-ctl switch proj-dev --workdir ~/proj-v2
+      agentgate-ctl switch proj-dev --workdir ~/proj-v2 --new-name proj-dev-v2
+      agentgate-ctl switch proj-dev --workdir ~/proj-v2 --keep-old --dry-run
+    """
+    config = _load_gateway_config()
+
+    # Validate old backend
+    if old_backend not in config.get("backends", {}):
+        click.echo(f"Error: backend '{old_backend}' not found in gateway config", err=True)
+        sys.exit(1)
+
+    old_bc = config["backends"][old_backend]
+    old_routes = [r for r in config.get("routes", []) if r.get("backend") == old_backend]
+
+    # Derive new backend name, avoiding collisions
+    if new_name is None:
+        candidate = f"{old_backend}-new"
+        counter = 2
+        while candidate in config.get("backends", {}) or _instance_exists(candidate):
+            candidate = f"{old_backend}-new{counter}"
+            counter += 1
+        new_name = candidate
+    elif new_name in config.get("backends", {}) or _instance_exists(new_name):
+        click.echo(f"Error: backend '{new_name}' already exists", err=True)
+        sys.exit(1)
+
+    # Inherit agent_type from old backend config
+    if agent_type is None:
+        agent_type = old_bc.get("agent_type", "claude-code")
+
+    work_path = Path(workdir).expanduser().resolve()
+    default_window = work_path.name
+    port = _next_port(config)
+    api_token = f"{new_name}-{secrets.token_hex(8)}"
+
+    _PROCESS_NAMES = {"claude-code": "claude", "opencode": "node", "qoder": "qodercli"}
+    _COMMANDS = {
+        "claude-code": "claude --dangerously-skip-permissions",
+        "opencode": "opencode",
+        "qoder": "qodercli -p --yolo --output-format stream-json",
+    }
+    process_name = _PROCESS_NAMES.get(agent_type, "claude")
+    agent_command = _COMMANDS.get(agent_type, "claude --dangerously-skip-permissions")
+
+    # Dry run: print plan only
+    if dry_run:
+        click.echo("--- DRY RUN (no changes made) ---")
+        click.echo(f"CREATE  backend:       {new_name}")
+        click.echo(f"        workdir:       {work_path}")
+        click.echo(f"        port:          {port}")
+        click.echo(f"        agent_type:    {agent_type}")
+        click.echo(f"        default_window:{default_window}")
+        if old_routes:
+            click.echo(f"REROUTE {len(old_routes)} route(s): {old_backend} → {new_name}")
+            for r in old_routes:
+                click.echo(f"        {r['channel']}/{r.get('bot_id', '?')}/{r['chat_id']}")
+        else:
+            click.echo(f"  (no routes to reroute from '{old_backend}')")
+        click.echo(f"RELOAD  gateway + reset offset for '{new_name}'")
+        if not keep_old:
+            click.echo(f"REMOVE  backend '{old_backend}': stop service, clean offset")
+        return
+
+    # Confirmation (skip if --yes or no routes being moved)
+    if not yes and old_routes:
+        route_summary = ", ".join(
+            f"{r['channel']}/{r['chat_id']}" for r in old_routes
+        )
+        click.confirm(
+            f"Switch {len(old_routes)} route(s) ({route_summary}) "
+            f"from '{old_backend}' to new backend '{new_name}'?",
+            abort=True,
+        )
+
+    # 1. Create workdir
+    work_path.mkdir(parents=True, exist_ok=True)
+
+    # 2. Write .env for new backend
+    instance_dir = BACKENDS_DIR / new_name
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    env_content = (
+        f"AGENTGATE_NAME={new_name}\n"
+        f"AGENTGATE_PORT={port}\n"
+        f"AGENTGATE_HTTP_PORT={port}\n"
+        f"AGENTGATE_API_TOKEN={api_token}\n"
+        f"AGENTGATE_AGENT_TYPE={agent_type}\n"
+        f"AGENTGATE_AGENT_MODE=tmux\n"
+        f"AGENTGATE_PROCESS_NAME={process_name}\n"
+        f"AGENTGATE_TMUX_SESSION_NAME=agentgate-{new_name}\n"
+        f"AGENTGATE_WORK_DIR={work_path}\n"
+    )
+    if agent_type == "claude-code":
+        env_content += f"AGENTGATE_CLAUDE_COMMAND={agent_command}\n"
+    (instance_dir / ".env").write_text(env_content)
+    click.echo(f"  Created .env: {instance_dir / '.env'}")
+
+    # 3. Update gateway config: add new backend + reroute
+    config.setdefault("backends", {})[new_name] = {
+        "url": f"http://127.0.0.1:{port}",
+        "api_token": api_token,
+        "agent_type": agent_type,
+        "default_window": default_window,
+    }
+    for r in config.get("routes", []):
+        if r.get("backend") == old_backend:
+            r["backend"] = new_name
+    _save_gateway_config(config)
+    click.echo(f"  Gateway config: added '{new_name}', rerouted {len(old_routes)} route(s)")
+
+    # 4. Create tmux session (backend creates the work window, but not the session itself)
+    tmux_session = f"agentgate-{new_name}"
+    result = subprocess.run(
+        ["tmux", "new-session", "-d", "-s", tmux_session, "-n", "__main__"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 and "duplicate session" not in result.stderr:
+        click.echo(
+            f"  Warning: tmux session creation failed: {result.stderr.strip()}", err=True
+        )
+    else:
+        click.echo(f"  Created tmux session: {tmux_session}")
+
+    # 5. Start new backend service
+    new_service = SYSTEMD_TEMPLATE.format(name=new_name)
+    subprocess.run(["sudo", "systemctl", "daemon-reload"], capture_output=True, check=True)
+    _systemctl("enable", new_service)
+    _systemctl("start", new_service)
+    click.echo(f"  Started {new_service}")
+
+    # 6. Hot-reload gateway (picks up new backend + updated routes)
+    _reload_gateway()
+
+    # 7. Reset offset for new backend (defensive: auto-seeded anyway, but explicit is safer)
+    _reset_backend_offset(new_name)
+
+    # 8. Remove old backend (unless --keep-old)
+    if not keep_old:
+        # Clean DB first (prevents stale offset if name is ever reused)
+        _clean_db_offset(old_backend)
+        # Reset in-memory offset so poller stops replaying if it reconnects before stopping
+        _reset_backend_offset(old_backend)
+        # Stop and disable service
+        old_service = SYSTEMD_TEMPLATE.format(name=old_backend)
+        _systemctl("stop", old_service, check=False)
+        _systemctl("disable", old_service, check=False)
+        click.echo(f"  Stopped {old_service}")
+        # Remove from gateway config + reload (removes from routing table)
+        config = _load_gateway_config()
+        config.get("backends", {}).pop(old_backend, None)
+        _save_gateway_config(config)
+        _reload_gateway()
+        click.echo(f"  Removed '{old_backend}' from gateway config")
+
+    click.echo(f"\n✓ Switch complete:")
+    click.echo(f"  Old backend: {old_backend} ({'kept' if keep_old else 'stopped + removed'})")
+    click.echo(f"  New backend: {new_name} (port {port})")
+    click.echo(f"  Workdir:     {work_path}")
+    click.echo(f"  Routes:      {len(old_routes)} moved")
+    click.echo(f"\nVerify:")
+    click.echo(
+        f"  curl http://127.0.0.1:{port}/api/health "
+        f"-H 'Authorization: Bearer {api_token}'"
+    )
+
+
+@cli.command("reroute")
+@click.argument("from_backend")
+@click.argument("to_backend")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without executing")
+def reroute(from_backend, to_backend, dry_run):
+    """Move all routes from one backend to another (both must already exist).
+
+    \b
+    Useful when you have two configured backends and want to switch which one
+    handles a conversation, without creating new instances.
+    Resets the gateway poll offset for the target backend after rerouting.
+
+    \b
+    Example:
+      agentgate-ctl reroute proj-dev proj-dev-v2
+    """
+    config = _load_gateway_config()
+    backends = config.get("backends", {})
+
+    if from_backend not in backends:
+        click.echo(f"Error: backend '{from_backend}' not found", err=True)
+        sys.exit(1)
+    if to_backend not in backends:
+        click.echo(f"Error: backend '{to_backend}' not found", err=True)
+        sys.exit(1)
+
+    affected = [r for r in config.get("routes", []) if r.get("backend") == from_backend]
+    if not affected:
+        click.echo(f"Warning: '{from_backend}' has no routes — nothing to reroute", err=True)
+
+    if dry_run:
+        click.echo("--- DRY RUN (no changes made) ---")
+        click.echo(f"REROUTE {len(affected)} route(s): {from_backend} → {to_backend}")
+        for r in affected:
+            click.echo(f"  {r['channel']}/{r.get('bot_id', '?')}/{r['chat_id']}")
+        click.echo(f"RELOAD  gateway + reset offset for '{to_backend}'")
+        return
+
+    for r in config.get("routes", []):
+        if r.get("backend") == from_backend:
+            r["backend"] = to_backend
+
+    _save_gateway_config(config)
+    click.echo(f"  Updated {len(affected)} route(s): {from_backend} → {to_backend}")
+
+    _reload_gateway()
+    _reset_backend_offset(to_backend)
+
+    click.echo(f"\n✓ Rerouted {len(affected)} route(s): {from_backend} → {to_backend}")
+    for r in affected:
+        click.echo(f"  {r['channel']}/{r.get('bot_id', '?')}/{r['chat_id']}")
 
 
 if __name__ == "__main__":

@@ -45,13 +45,13 @@ def tmp_home(tmp_path, monkeypatch):
             {
                 "channel": "feishu",
                 "bot_id": "test_app_id",
-                "group_id": "oc_group1",
+                "chat_id": "oc_group1",
                 "backend": "echo-a",
             },
             {
                 "channel": "telegram",
                 "bot_id": "test_tg_bot",
-                "group_id": "-123456",
+                "chat_id": "-123456",
                 "backend": "echo-a",
             },
         ],
@@ -114,7 +114,7 @@ class TestBotIdDetection:
         config = {
             "channels": {"telegram": {"bot_token": "123:ABC"}},
             "routes": [
-                {"channel": "telegram", "bot_id": "my_tg_bot", "group_id": "-1"},
+                {"channel": "telegram", "bot_id": "my_tg_bot", "chat_id": "-1"},
             ],
         }
         assert _detect_bot_id(config, "telegram") == "my_tg_bot"
@@ -152,7 +152,7 @@ class TestCreateCommand:
         result = runner.invoke(cli, [
             "create", "test-new",
             "--channel", "feishu",
-            "--group-id", "oc_newgroup",
+            "--chat-id", "oc_newgroup",
         ])
         assert result.exit_code == 0, result.output
         assert "test-new" in result.output
@@ -189,7 +189,7 @@ class TestCreateCommand:
         result = runner.invoke(cli, [
             "create", "existing",
             "--channel", "feishu",
-            "--group-id", "oc_group2",
+            "--chat-id", "oc_group2",
         ])
         assert result.exit_code != 0
         assert "already exists" in result.output
@@ -205,7 +205,7 @@ class TestCreateCommand:
         result = runner.invoke(cli, [
             "create", "inst1",
             "--channel", "feishu",
-            "--group-id", "oc_g1",
+            "--chat-id", "oc_g1",
         ])
         assert result.exit_code == 0
 
@@ -284,7 +284,7 @@ class TestRemoveCommand:
         config["routes"].append({
             "channel": "feishu",
             "bot_id": "test_app_id",
-            "group_id": "oc_remove",
+            "chat_id": "oc_remove",
             "backend": "to-remove",
         })
         with open(config_path, "w") as f:

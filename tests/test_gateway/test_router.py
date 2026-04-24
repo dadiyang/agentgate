@@ -6,8 +6,8 @@ from agentgate_gateway.config import RouteConfig
 from agentgate_gateway.router import Router
 
 
-def make_route(channel: str, bot_id: str, group_id: str, backend: str) -> RouteConfig:
-    return RouteConfig(channel=channel, bot_id=bot_id, group_id=group_id, backend=backend)
+def make_route(channel: str, bot_id: str, chat_id: str, backend: str) -> RouteConfig:
+    return RouteConfig(channel=channel, bot_id=bot_id, chat_id=chat_id, backend=backend)
 
 
 class TestMatch:

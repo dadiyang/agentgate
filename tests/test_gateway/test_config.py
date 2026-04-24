@@ -39,7 +39,7 @@ class TestLoadValidYaml:
             routes:
               - channel: feishu
                 bot_id: cli_abc123
-                group_id: grp_001
+                chat_id: grp_001
                 backend: fish-dev
             alerts:
               feishu_webhook: https://open.feishu.cn/webhook/xxx
@@ -72,7 +72,7 @@ class TestLoadValidYaml:
         route = cfg.routes[0]
         assert route.channel == "feishu"
         assert route.bot_id == "cli_abc123"
-        assert route.group_id == "grp_001"
+        assert route.chat_id == "grp_001"
         assert route.backend == "fish-dev"
 
         assert cfg.alerts.feishu_webhook == "https://open.feishu.cn/webhook/xxx"

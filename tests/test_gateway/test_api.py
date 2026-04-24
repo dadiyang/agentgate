@@ -21,8 +21,7 @@ def create_test_app(test_mode: bool = True):
     config.api_token = ""
 
     db = AsyncMock()
-    db.get_pending_inbound = AsyncMock(return_value=[])
-    db.get_pending_outbound = AsyncMock(return_value=[])
+    db.get_pending = AsyncMock(return_value=[])
     db.query_messages = AsyncMock(return_value=([], 0))
 
     mock_adapter = MagicMock()
@@ -85,9 +84,14 @@ class TestHealthEndpoint(AioHTTPTestCase):
     async def test_health_includes_pending_counts(self):
         """pending_inbound and pending_outbound are populated from DB."""
         app, gw, *_ = create_test_app()
-        # Override to return non-empty lists
-        gw._db.get_pending_inbound = AsyncMock(return_value=[{"id": "1"}, {"id": "2"}])
-        gw._db.get_pending_outbound = AsyncMock(return_value=[{"id": "3"}])
+        # Override to return non-empty lists per direction
+        async def _get_pending(direction):
+            if direction == "inbound":
+                return [{"id": "1"}, {"id": "2"}]
+            if direction == "outbound":
+                return [{"id": "3"}]
+            return []
+        gw._db.get_pending = _get_pending
 
         async with self.client.session.get(
             self.client.make_url("/api/health")

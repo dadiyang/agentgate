@@ -275,6 +275,27 @@ class GatewayAPI:
             logger.error("Config reload failed: %s", e, exc_info=True)
             return _json({"ok": False, "error": "reload_failed", "msg": str(e)}, 500)
 
+    async def handle_reset_offset(self, request: web.Request) -> web.Response:
+        """POST /api/admin/backend/{backend_id}/reset-offset — Reset output poll offset.
+
+        Clears both in-memory offset and DB record for a backend.
+        Next poll cycle will auto-seed to current output position (no history replay).
+        Used by agentgate-ctl switch/reroute to ensure clean start after workspace change.
+        """
+        auth_err = _check_gateway_auth(request, self.config.api_token)
+        if auth_err:
+            return auth_err
+        backend_id = request.match_info["backend_id"]
+        if backend_id not in self._backends:
+            return _json(
+                {"ok": False, "error": "backend_not_found", "msg": f"Backend '{backend_id}' not configured"},
+                404,
+            )
+        old_offset = self._poller._offsets.get(backend_id, 0)
+        await self._poller.reset_offset(backend_id)
+        logger.info("Admin reset-offset: backend=%s old_offset=%d", backend_id, old_offset)
+        return _json({"ok": True, "backend_id": backend_id, "old_offset": old_offset})
+
     # ------------------------------------------------------------------ #
     #  Admin endpoints (only registered when test_mode=True)              #
     # ------------------------------------------------------------------ #
@@ -374,6 +395,7 @@ def setup_routes(app: web.Application, gateway: GatewayAPI) -> None:
     app.router.add_get("/api/health", gateway.handle_health)
     app.router.add_post("/api/messages/query", gateway.handle_messages_query)
     app.router.add_post("/api/admin/reload", gateway.handle_reload)
+    app.router.add_post("/api/admin/backend/{backend_id}/reset-offset", gateway.handle_reset_offset)
 
     if gateway.config.test_mode:
         app.router.add_post("/api/admin/adapter/{name}/disconnect", gateway.handle_admin_disconnect)

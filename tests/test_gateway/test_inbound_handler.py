@@ -25,8 +25,8 @@ def _make_handler(db=None, router=None, backends=None, adapters=None):
     db = db or MagicMock()
     db.has_dedup_key = AsyncMock(return_value=False)
     db.save_inbound = AsyncMock()
-    db.update_inbound_delivery = AsyncMock()
-    db.increment_inbound_retry = AsyncMock()
+    db.update_status = AsyncMock()
+    db.increment_retry = AsyncMock()
 
     if router is None:
         router = MagicMock()
@@ -42,7 +42,7 @@ def _make_handler(db=None, router=None, backends=None, adapters=None):
 MSG_DEFAULTS = dict(
     channel_type="telegram",
     bot_id="bot1",
-    group_id="grp1",
+    chat_id="grp1",
     sender_id="usr1",
     sender_name="Alice",
     group_name="Test Group",
@@ -87,8 +87,8 @@ async def test_successful_inject():
         await handler.handle_message(**MSG_DEFAULTS)
 
     db.save_inbound.assert_called_once()
-    db.update_inbound_delivery.assert_called_once()
-    call_args = db.update_inbound_delivery.call_args
+    db.update_status.assert_called_once()
+    call_args = db.update_status.call_args
     assert call_args[0][1] == "delivered"
 
 
@@ -120,8 +120,8 @@ async def test_inject_retry_on_failure():
         await handler.handle_message(**MSG_DEFAULTS)
 
     assert call_count == 3
-    db.update_inbound_delivery.assert_called_once()
-    assert db.update_inbound_delivery.call_args[0][1] == "delivered"
+    db.update_status.assert_called_once()
+    assert db.update_status.call_args[0][1] == "delivered"
 
 
 @pytest.mark.asyncio
@@ -140,13 +140,13 @@ async def test_inject_all_retries_exhausted():
         await handler.handle_message(**MSG_DEFAULTS)
 
     # delivery status must be set to 'failed'
-    db.update_inbound_delivery.assert_called_once()
-    assert db.update_inbound_delivery.call_args[0][1] == "failed"
+    db.update_status.assert_called_once()
+    assert db.update_status.call_args[0][1] == "failed"
 
     # user must be notified in the IM group (AC-29)
     adapter.send_message.assert_called_once()
     notify_args = adapter.send_message.call_args[0]
-    assert notify_args[0] == MSG_DEFAULTS["group_id"]
+    assert notify_args[0] == MSG_DEFAULTS["chat_id"]
     assert "⚠️" in notify_args[1]
 
 
@@ -207,5 +207,5 @@ async def test_backend_not_configured():
 
     await handler.handle_message(**MSG_DEFAULTS)
 
-    db.update_inbound_delivery.assert_called_once()
-    assert db.update_inbound_delivery.call_args[0][1] == "failed"
+    db.update_status.assert_called_once()
+    assert db.update_status.call_args[0][1] == "failed"

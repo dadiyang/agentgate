@@ -1,5 +1,6 @@
 """Tests for OutputPoller: filtering, persistence, push failures, offset tracking."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,15 +25,17 @@ def _make_adapter(send_result=True):
 def _make_db():
     db = MagicMock()
     db.save_outbound = AsyncMock()
-    db.update_outbound_push = AsyncMock()
-    db.has_outbound_content_hash = AsyncMock(return_value=False)
-    db.increment_outbound_retry = AsyncMock()
+    db.update_status = AsyncMock()
+    db.has_content_hash = AsyncMock(return_value=False)
+    db.increment_retry = AsyncMock()
+    db.save_poll_offset = AsyncMock()
+    db.load_poll_offsets = AsyncMock(return_value={})
     return db
 
 
 def _make_router(bindings=None):
     router = MagicMock()
-    # reverse_lookup returns list of (channel_type, bot_id, group_id)
+    # reverse_lookup returns list of (channel_type, bot_id, chat_id)
     router.reverse_lookup = MagicMock(
         return_value=bindings or [("telegram", "bot1", "grp1")]
     )
@@ -55,6 +58,12 @@ def _mock_http_get(poller, response_data):
     poller._http.get = AsyncMock(return_value=resp)
 
 
+async def _drain_push_tasks(poller):
+    """Await all background push tasks created during _poll_backend."""
+    if poller._push_tasks:
+        await asyncio.gather(*list(poller._push_tasks))
+
+
 @pytest.mark.asyncio
 async def test_thinking_messages_filtered():
     """Backend returns thinking + text messages → only text pushed to channel."""
@@ -69,6 +78,7 @@ async def test_thinking_messages_filtered():
         adapters={"telegram": adapter},
     )
 
+    poller._offsets["b1"] = 0  # pre-seed so seeding phase is skipped
     messages = [
         {"content_type": "thinking", "text": "Let me think..."},
         {"content_type": "text", "text": "Hello from agent"},
@@ -76,6 +86,7 @@ async def test_thinking_messages_filtered():
     _mock_http_get(poller, _make_output_response(messages))
 
     await poller._poll_backend("b1", backend)
+    await _drain_push_tasks(poller)
 
     adapter.send_message.assert_called_once()
     sent_text = adapter.send_message.call_args[0][1]
@@ -97,6 +108,7 @@ async def test_all_thinking_no_push():
         adapters={"telegram": adapter},
     )
 
+    poller._offsets["b1"] = 0
     messages = [
         {"content_type": "thinking", "text": "step 1"},
         {"content_type": "thinking", "text": "step 2"},
@@ -104,6 +116,7 @@ async def test_all_thinking_no_push():
     _mock_http_get(poller, _make_output_response(messages))
 
     await poller._poll_backend("b1", backend)
+    await _drain_push_tasks(poller)
 
     adapter.send_message.assert_not_called()
     db.save_outbound.assert_not_called()
@@ -121,7 +134,7 @@ async def test_output_persisted_before_push():
     async def mock_save_outbound(msg):
         call_order.append("save_outbound")
 
-    async def mock_send_message(group_id, text):
+    async def mock_send_message(chat_id, text):
         call_order.append("send_message")
         return True
 
@@ -136,10 +149,12 @@ async def test_output_persisted_before_push():
         adapters={"telegram": adapter},
     )
 
+    poller._offsets["b1"] = 0
     messages = [{"content_type": "text", "text": "Hello"}]
     _mock_http_get(poller, _make_output_response(messages))
 
     await poller._poll_backend("b1", backend)
+    await _drain_push_tasks(poller)
 
     assert call_order.index("save_outbound") < call_order.index("send_message"), \
         "save_outbound must be called before send_message"
@@ -147,7 +162,7 @@ async def test_output_persisted_before_push():
 
 @pytest.mark.asyncio
 async def test_push_failure_marks_failed():
-    """adapter.send_message returns False → push_status 'failed'."""
+    """adapter.send_message returns False → status updated to 'failed'."""
     db = _make_db()
     router = _make_router()
     backend = _make_backend()
@@ -159,15 +174,17 @@ async def test_push_failure_marks_failed():
         adapters={"telegram": adapter},
     )
 
+    poller._offsets["b1"] = 0
     messages = [{"content_type": "text", "text": "Hello"}]
     _mock_http_get(poller, _make_output_response(messages))
 
     with patch("asyncio.sleep", new=AsyncMock()):
         await poller._poll_backend("b1", backend)
+        await _drain_push_tasks(poller)
 
-    db.update_outbound_push.assert_called_once()
-    call_args = db.update_outbound_push.call_args
-    assert call_args[0][1] == "failed"
+    db.update_status.assert_called()
+    final_status_call = db.update_status.call_args_list[-1]
+    assert final_status_call[0][1] == "failed"
 
 
 @pytest.mark.asyncio
@@ -188,11 +205,7 @@ async def test_unhealthy_backend_skipped():
     poller._poll_backend = AsyncMock()
 
     # Patch asyncio.sleep to stop the loop after one iteration
-    iteration = 0
-
     async def mock_sleep(delay):
-        nonlocal iteration
-        iteration += 1
         poller.stop()
 
     with patch("asyncio.sleep", new=mock_sleep):
@@ -215,7 +228,8 @@ async def test_offset_tracking():
         adapters={"telegram": adapter},
     )
 
-    assert poller._offsets.get("b1", 0) == 0
+    poller._offsets["b1"] = 0  # pre-seed, simulating a previously-seen backend
+    assert poller._offsets["b1"] == 0
 
     messages = [{"content_type": "text", "text": "Hello"}]
     _mock_http_get(poller, _make_output_response(messages, next_offset=42))
@@ -263,21 +277,22 @@ async def test_no_adapter_marks_failed():
         adapters={},  # no adapter for 'wechat'
     )
 
+    poller._offsets["b1"] = 0
     messages = [{"content_type": "text", "text": "Hello"}]
     _mock_http_get(poller, _make_output_response(messages))
 
     await poller._poll_backend("b1", backend)
+    await _drain_push_tasks(poller)
 
     db.save_outbound.assert_called_once()
-    db.update_outbound_push.assert_called_once()
-    assert db.update_outbound_push.call_args[0][1] == "failed"
+    db.update_status.assert_called()
+    assert db.update_status.call_args[0][1] == "failed"
 
 
 @pytest.mark.asyncio
 async def test_repush_message_success():
-    """repush_message pushes and updates status to 'pushed'."""
+    """repush_message pushes and updates status to 'delivered'."""
     db = _make_db()
-    router = _make_router()
     adapter = _make_adapter(send_result=True)
 
     poller = OutputPoller(
@@ -289,14 +304,14 @@ async def test_repush_message_success():
     msg = {
         "id": "msg-123",
         "channel_type": "telegram",
-        "group_id": "grp1",
+        "chat_id": "grp1",
         "content": "Hello",
     }
     await poller.repush_message(msg)
 
     adapter.send_message.assert_called_once_with("grp1", "Hello")
-    db.update_outbound_push.assert_called_once()
-    assert db.update_outbound_push.call_args[0][1] == "pushed"
+    db.update_status.assert_called_once()
+    assert db.update_status.call_args[0][1] == "delivered"
 
 
 @pytest.mark.asyncio
