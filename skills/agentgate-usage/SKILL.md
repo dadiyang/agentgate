@@ -123,6 +123,13 @@ routes:
 
 热加载：`kill -HUP $(pidof agentgate-gateway)` 或 `POST /api/admin/reload`
 
+**热加载边界**：只更新无状态映射（路由表、backend url/token、route 重定向），**不会启动/停止有状态长连接**（Telegram bot poller、Feishu WebSocket、DingTalk stream 等 adapter 进程级连接）。
+
+- 加新 Telegram bot 后热加载日志显示 `routes: N → N+1, backends_added: 1` 看似成功，但**没有** `Telegram bot started: <new_bot>` 日志，新 bot 收消息无响应
+- 删除 bot 同理：从 config 删了但旧 poller 仍在跑
+- 修复：`sudo systemctl restart agentgate-gateway`，启动日志确认 `journalctl -u agentgate-gateway -n 50 | grep "bot started"` 含所有 bot
+- 通用原则：任何"进程级长连接"adapter（WebSocket、长轮询、gRPC stream）都不能被热加载接管
+
 **`default_window` = `WORK_DIR` basename**（头号出错点）：
 
 | WORK_DIR | default_window |
@@ -237,6 +244,7 @@ journalctl -u agentgate-gateway --since "10 min ago" | grep "backend=<id>"
 | Agent 卡在 OAuth / SelfMonitor 标记 degraded | CC 登录过期 | `claude /login` |
 | SelfMonitor 反复重启 agent | PROCESS_NAME 不匹配 pane_current_command | 检查并更新 .env 中 PROCESS_NAME |
 | 飞书 adapter 启动失败 | app_id/secret 错误或走了代理 | 确认凭证 + 飞书需直连 |
+| 新加 Telegram bot 收消息无响应（热加载已成功） | 热加载不启动新 adapter 实例（process-level long connection 限制） | `sudo systemctl restart agentgate-gateway`，启动日志查 `bot started` 含所有 bot |
 | Telegram adapter 失败 | bot_token 错误或代理未配 | config.yaml adapter 级 `proxy` 字段 |
 | subprocess 模式重启后无上下文 | 进程被强杀时 session_id 未保存 | 不可恢复，以新 session 启动 |
 
