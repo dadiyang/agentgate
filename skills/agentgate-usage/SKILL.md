@@ -201,9 +201,27 @@ tmux list-windows -t agentgate-<name> -F '#{window_name} #{pane_current_command}
 
 # 3. gateway 健康
 curl http://127.0.0.1:8800/api/health
+
+# 4. ★ inject 端到端验证（必做，暴露代码/进程不一致）
+curl -X POST http://127.0.0.1:<PORT>/api/inject \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"ping","window_name":"<default_window>","sender_id":"sop","sender_name":"SOP"}'
+# 预期：{"ok": true, ...}
+# 500 → backend 代码与进程不一致，重启 backend（清 __pycache__ 后 systemctl restart）
+
+# 5. ★ output 可读验证（暴露 session_map 过期）
+curl "http://127.0.0.1:<PORT>/api/output/<default_window>?since=0" \
+  -H "Authorization: Bearer <TOKEN>"
+# 预期：ok=true, next_offset > 0
+# next_offset=0 → session_map 未写入（Stop hook 未注册或 CC 从未停过）
+# 修复：手动更新 ~/.agentgate/backends/<name>/session_map.json 指向正确 session_id
+#       再 POST /api/admin/backend/<name>/reset-offset 重置 poller 位置
 ```
 
 **发现问题先停 backend 再修**：`systemctl stop agentgate-backend@<name>`
+
+> **步骤4/5 的价值**：代码不兼容（inject 签名变更）和 session_map 过期（CC 长期未重启未触发 Stop hook）都是"进程活着但链路不通"的静默故障，前3步无法发现，只有 end-to-end 探测才能暴露。
 
 ---
 
