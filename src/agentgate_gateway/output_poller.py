@@ -206,7 +206,7 @@ class OutputPoller:
             await self._set_offset(backend_id, next_offset)
             return
 
-        msg_count = data.get("count", 0)
+        msg_count = data.get("count") if "count" in data else len(data.get("messages", []))
         if msg_count == 0:
             await self._set_offset(backend_id, next_offset)
             return
